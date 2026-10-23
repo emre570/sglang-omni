@@ -28,12 +28,10 @@ Visible differences:
 - `input-send-receipts.json` is written without indentation. Readers parse it with `json.loads`, so only its bytes and hash change. The indented dump runs in pure Python and held the GIL from the pacing loop.
 - While a session records, its trace on disk lags by up to 0.5 s.
 - `run_session` returns about 50 ms later, while its last batch is written.
-- Pacing jitter at low load is larger: for 128 sessions in one process over 30 s, the p99 deviation rose from 4.8 ms to 17.2 ms and the maximum from 14 ms to 37 ms. Each batch takes the GIL from the loop for a moment. This trades a bounded jitter well inside 80 ms for stalls of up to 1.3 s.
+- Pacing jitter at low load is larger: for 128 sessions in one process over 30 s, the pooled p99 deviation rose from 5.0 ms to 16.6 ms and the median run maximum from 14 ms to 37 ms. Each batch takes the GIL from the loop for a moment. This trades a bounded jitter well inside 80 ms for stalls of up to 1.3 s.
 
 The design was chosen by measurement. The disk load on the host changed over time: at 1 × 256 sessions and 30 s, the unchanged client passed 5 of 5 runs on one day and 1 of 3 on the next. The rows marked interleaved ran in one batch in random order; the others ran on their own and are weaker evidence.
 
-| Variant, 30 s unless noted | 4 × 64 unqualified | 1 × 256 unqualified |
-|---|---|---|
 | Variant, 30 s unless noted | 4 × 64 unqualified | 1 × 256 unqualified |
 |---|---|---|
 | Unchanged client (interleaved) | 3 of 3 | 2 of 3 |
@@ -49,17 +47,17 @@ With a thread per session, the loop waited for the GIL, which those threads took
 
 ## Results
 
-Each cell pools the runs of one layout: P processes of S sessions each, every session streaming silence of 16 kHz PCM16 in 80 ms packets to the mock server, which replies to each packet with one audio delta, one text delta and one `sglang.unit.done`. Every session of every run here completed. The maximum is the median over runs of each run's largest deviation, with the range in brackets. The unchanged client's 90 s runs and the changed client's 90 s runs were recorded hours apart, not interleaved.
+P99 values pool the packet deviations across all runs of one layout: P processes of S sessions each, every session streaming silence of 16 kHz PCM16 in 80 ms packets to the mock server, which replies to each packet with one audio delta, one text delta and one `sglang.unit.done`. Every session of every run here completed. The maximum is the median over runs of each run's largest deviation, with the range in brackets. The unchanged client's 90 s runs and the changed client's 90 s runs were recorded hours apart, not interleaved.
 
 ### 90 s sessions
 
 | Layout | Unchanged: unqualified runs | late packets | p99 (ms) | maximum (ms) | Changed: unqualified runs | late packets | p99 (ms) | maximum (ms) |
 |---|---|---|---|---|---|---|---|---|
-| 1 × 64 | 1 of 3 | 7 | 11.3 | 49 [33–102] | 0 of 4 | 0 | 14.0 | 40 [38–48] |
-| 1 × 128 | 6 of 7 | 3,571 | 23.7 | 158 [74–584] | 0 of 4 | 0 | 17.8 | 52 [49–55] |
-| 1 × 256 | 3 of 3 | 53,835 | 450.9 | 700 [655–1,170] | 1 of 4 | 618 | 36.7 | 80 [67–112] |
-| 4 × 32 | 2 of 3 | 495 | 7.8 | 476 [45–598] | 0 of 4 | 0 | 8.1 | 43 [34–53] |
-| 4 × 64 | 7 of 7 | 11,047 | 25.0 | 901 [407–1,296] | 1 of 4 | 44 | 18.4 | 61 [49–138] |
+| 1 × 64 | 1 of 3 | 7 | 11.7 | 49 [33–102] | 0 of 4 | 0 | 14.8 | 40 [38–48] |
+| 1 × 128 | 6 of 7 | 3,571 | 27.3 | 158 [74–584] | 0 of 4 | 0 | 20.0 | 51 [49–55] |
+| 1 × 256 | 3 of 3 | 53,835 | 864.8 | 700 [655–1,170] | 1 of 4 | 618 | 40.8 | 79 [67–112] |
+| 4 × 32 | 2 of 3 | 495 | 8.0 | 476 [45–598] | 0 of 4 | 0 | 8.8 | 43 [34–53] |
+| 4 × 64 | 7 of 7 | 11,047 | 27.4 | 901 [407–1,296] | 1 of 4 | 44 | 17.6 | 58 [49–138] |
 
 Stalls over 100 ms in disk waits fell from 52 to 0. The remaining late packets have other causes. In 1 × 256 the process was running on its CPU through the stalls and used 0.92 cores, so one process has no headroom for 256 sessions. In 4 × 64 all 44 late packets fell at 90.2–90.3 s in one run, while the sessions of each process were ending, and the loop was waiting for the GIL.
 
@@ -67,11 +65,11 @@ Stalls over 100 ms in disk waits fell from 52 to 0. The remaining late packets h
 
 | Layout | Unchanged: unqualified runs | late packets | p99 (ms) | maximum (ms) | Changed: unqualified runs | late packets | p99 (ms) | maximum (ms) |
 |---|---|---|---|---|---|---|---|---|
-| 1 × 64 | 0 of 5 | 0 | 11.4 | 25 [15–28] | 0 of 5 | 0 | 14.2 | 36 [35–37] |
-| 1 × 128 | 0 of 5 | 0 | 4.8 | 14 [7–14] | 0 of 5 | 0 | 17.2 | 37 [36–49] |
-| 1 × 256 | 2 of 8 | 18,389 | 7.5 | 40 [19–755] | 0 of 5 | 0 | 28.1 | 54 [47–80] |
+| 1 × 64 | 0 of 5 | 0 | 12.3 | 25 [15–28] | 0 of 5 | 0 | 14.2 | 36 [35–37] |
+| 1 × 128 | 0 of 5 | 0 | 5.0 | 14 [7–14] | 0 of 5 | 0 | 16.6 | 37 [36–49] |
+| 1 × 256 | 2 of 8 | 18,389 | 322.5 | 40 [19–755] | 0 of 5 | 0 | 30.4 | 54 [47–80] |
 | 4 × 32 | 0 of 5 | 0 | 8.0 | 34 [33–36] | 0 of 5 | 0 | 6.9 | 30 [12–31] |
-| 4 × 64 | 12 of 23 | 1,823 | 14.8 | 81 [26–750] | 0 of 5 | 0 | 16.6 | 41 [41–58] |
+| 4 × 64 | 12 of 23 | 1,823 | 16.2 | 81 [26–750] | 0 of 5 | 0 | 17.4 | 41 [41–58] |
 
 A 30 s session ends near the 30 s writeback age, so 30 s runs see fewer disk stalls than 90 s runs, which is why the 90 s table is the stronger test.
 
