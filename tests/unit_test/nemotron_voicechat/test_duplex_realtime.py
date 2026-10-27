@@ -104,6 +104,16 @@ def single_session_deployment(
     )
 
 
+def test_warmup_sends_three_silent_units_and_closes_its_session() -> None:
+    client = RecordingSessionClient()
+    asyncio.run(single_session_deployment(client).warmup(30))
+    assert [chunk.payload for chunk in client.chunks if chunk.payload] == [
+        bytes(2560)
+    ] * 3
+    assert client.chunks[-1].eos
+    assert client.closed_sessions == 1
+
+
 def send_event(
     websocket: WebSocketTestSession, event_type: str, **fields: JsonValue
 ) -> None:
