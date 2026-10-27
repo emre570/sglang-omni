@@ -7,11 +7,12 @@ import pytest
 import torch
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 
+from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.models.nemotron_voicechat.duplex_ar import (
     DuplexTalkerRunner,
     DuplexThinkerRunner,
     FrameHistory,
-    UnitDecodeMixin,
+    UnitDecodeRunner,
 )
 from sglang_omni.scheduling.types import SchedulerRequest
 
@@ -26,7 +27,7 @@ def unit_batch(**overrides) -> Mock:
     return Mock(**fields)
 
 
-class RecordingRunner:
+class RecordingRunner(ModelRunner):
     def __init__(self) -> None:
         self.modes_seen: list[ForwardMode] = []
 
@@ -36,7 +37,7 @@ class RecordingRunner:
         return Mock(name="forward_batch"), batch, batch.forward_mode.is_extend()
 
 
-class PromotingRunner(UnitDecodeMixin, RecordingRunner):
+class PromotingRunner(UnitDecodeRunner, RecordingRunner):
     pass
 
 

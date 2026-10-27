@@ -12,20 +12,19 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 from transformers import PreTrainedTokenizerBase
 
 from sglang_omni.admission import ContextExhaustedError
+from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.model_runner.prefill_inputs import (
     OmniPrefillInputs,
     attach_omni_prefill_inputs,
 )
 from sglang_omni.models.nemotron_voicechat.cuda_graph import capture_cuda_graph
-from sglang_omni.models.nemotron_voicechat.model_runner import (
-    NemotronVoiceChatModelRunner,
-)
+from sglang_omni.models.nemotron_voicechat.model_runner import VoiceChatModelRunner
 from sglang_omni.models.nemotron_voicechat.payload_types import TOOL_CALLS
 from sglang_omni.models.nemotron_voicechat.request_builders import ar_request
 from sglang_omni.models.nemotron_voicechat.talker_model_runner import (
     NUM_ITER,
-    NemotronVoiceChatTalkerModelRunner,
+    VoiceChatTalkerModelRunner,
 )
 from sglang_omni.models.nemotron_voicechat.tools import (
     END_OF_TOOL_CALL_TOKEN,
@@ -98,7 +97,7 @@ def attach_fusion_rows(
     )
 
 
-class UnitDecodeMixin:
+class UnitDecodeRunner(ModelRunner):
     def build_forward_batch(
         self, scheduler_output: SchedulerOutput
     ) -> tuple[ForwardBatch | None, ScheduleBatch, bool] | None:
@@ -130,9 +129,7 @@ class UnitDecodeMixin:
         self.model.fusion_mask[: len(rows)] = True
 
 
-class DuplexThinkerRunner(UnitDecodeMixin, NemotronVoiceChatModelRunner):
-    before_decode = UnitDecodeMixin.before_decode
-
+class DuplexThinkerRunner(UnitDecodeRunner, VoiceChatModelRunner):
     def before_prefill(
         self,
         forward_batch: ForwardBatch,
@@ -142,9 +139,7 @@ class DuplexThinkerRunner(UnitDecodeMixin, NemotronVoiceChatModelRunner):
         attach_fusion_rows(forward_batch, requests)
 
 
-class DuplexTalkerRunner(UnitDecodeMixin, NemotronVoiceChatTalkerModelRunner):
-    before_decode = UnitDecodeMixin.before_decode
-
+class DuplexTalkerRunner(UnitDecodeRunner, VoiceChatTalkerModelRunner):
     def __init__(
         self, tp_worker: ModelWorker, output_processor: SGLangOutputProcessor
     ) -> None:
