@@ -59,7 +59,7 @@ def restore_and_replay_prefix(
             num_token_non_padded=torch.tensor(
                 1, dtype=torch.int32, device=forward_batch.input_ids.device
             ),
-            num_token_non_padded_cpu=1,
+            global_num_token_non_padded_cpu=1,
             return_logprob=False,
             next_token_logits_buffer=None,
         )

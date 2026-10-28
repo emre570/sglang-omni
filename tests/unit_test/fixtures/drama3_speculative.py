@@ -139,7 +139,7 @@ class OfflinePairRequest:
             num_token_non_padded=torch.tensor(
                 row_count, dtype=torch.int32, device=self.device
             ),
-            num_token_non_padded_cpu=row_count,
+            global_num_token_non_padded_cpu=row_count,
             rids=[self.request.rid],
         )
 
