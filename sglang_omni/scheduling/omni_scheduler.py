@@ -35,7 +35,7 @@ from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import get_dp_tp_group
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import AbortReq
-from sglang.srt.managers.overlap_utils import resolve_forward_inputs
+from sglang.srt.managers.overlap_utils import RelayPayload, resolve_forward_inputs
 from sglang.srt.managers.schedule_batch import (
     FINISH_ABORT,
     NextBatchPlan,
@@ -2285,6 +2285,13 @@ class OmniScheduler(Generic[RequestDataT]):
         else:
             pass
         resolve_forward_inputs(batch, self.future_map)
+        if (
+            getattr(self.spec_algorithm, "name", None) == "DRAMA3_PAIR"
+            and batch.input_ids is None
+        ):
+            batch.input_ids = self.future_map.output_tokens_buf[
+                batch.req_pool_indices
+            ]
         with _Upstream._forward_isolation(  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
             self, batch, overlap=False
         ):
@@ -2303,6 +2310,15 @@ class OmniScheduler(Generic[RequestDataT]):
                 pass
         else:
             pass
+        if getattr(self.spec_algorithm, "name", None) == "DRAMA3_PAIR":
+            if not isinstance(result.next_token_ids, torch.Tensor):
+                raise RuntimeError(
+                    "DRAMA3_PAIR must publish one frame main token per request"
+                )
+            self.future_map.stash(
+                batch.req_pool_indices,
+                RelayPayload(bonus_tokens=result.next_token_ids),
+            )
         batch.input_ids = None
         self.update_cache_from_scheduler(batch, result)
         result.copy_done = torch.get_device_module(self.device).Event()

@@ -65,6 +65,7 @@ from sglang_omni.models.fishaudio_drama3.tower_kernels import (
     MAX_FUSED_ROWS,
 )
 from sglang_omni.models.fishaudio_drama3.tower_prefill import Drama3TowerPrefill
+from sglang_omni.speculative.drama3_pair import DRAMA3_PAIR_ALGORITHM
 from sglang_omni.scheduling.engine_factory import (
     GenerationDefaults,
     SchedulerExtras,
@@ -133,6 +134,7 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
 
     def pre_infra_setup(self, checkpoint_dir: str) -> None:
         """Register the classes the checkpoint names; the directory is the contract."""
+        del checkpoint_dir
         AutoConfig.register(FishOmniConfig.model_type, FishOmniConfig, exist_ok=True)
         ModelRegistry.models[FISH_OMNI_ARCHITECTURE] = Drama3ForCausalLM
         QUANTIZATION_METHODS[QUANTIZATION_METHOD] = ExpertFp8Config
@@ -206,13 +208,19 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
             raise ValueError(
                 "Drama 3 keeps page_size=1 and the KV cache in the model dtype"
             )
-        elif (
-            parallel_sizes != (1, 1, 1) or server_args.speculative_algorithm is not None
-        ):
+        elif parallel_sizes != (1, 1, 1):
             raise ValueError(
-                f"Drama 3 runs on one rank without speculative decoding; got "
+                f"Drama 3 runs on one rank; got "
                 f"tp/pp/dp={parallel_sizes} and "
                 f"speculative_algorithm={server_args.speculative_algorithm}"
+            )
+        elif (
+            server_args.speculative_algorithm is not None
+            and server_args.speculative_algorithm.upper() != DRAMA3_PAIR_ALGORITHM
+        ):
+            raise ValueError(
+                f"Drama 3 supports only {DRAMA3_PAIR_ALGORITHM} speculative "
+                f"decoding; got {server_args.speculative_algorithm}"
             )
         elif self.context_length > max_position_embeddings:
             raise ValueError(
@@ -222,6 +230,9 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
             )
         else:
             pass
+
+    def infra_kwargs(self) -> dict[str, object]:
+        return {"supports_speculative_decoding": True}
 
     def setup_model(
         self,

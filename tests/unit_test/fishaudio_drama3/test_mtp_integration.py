@@ -35,6 +35,7 @@ from sglang.srt.model_executor import model_runner as sglang_model_runner
 from sglang.srt.model_executor.cuda_graph_config import Backend as CudaGraphBackend
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from sglang_omni.model_runner.base import PendingStep
 from sglang_omni.model_runner.model_worker import ModelWorker
@@ -2443,6 +2444,25 @@ def test_engine_defaults_pass_its_own_validation(tmp_path: Path) -> None:
     assert graph_config.prefill.backend == CudaGraphBackend.BREAKABLE
     assert max(graph_config.prefill.bs) == PREFILL_CUDA_GRAPH_MAX_TOKENS
     assert server_args.prefill_decode_interval == DECODE_STEPS_BETWEEN_PREFILLS
+
+
+def test_engine_registers_drama3_pair_speculative_worker(tmp_path: Path) -> None:
+    builder, server_args = engine_server_args(
+        tmp_path,
+        {
+            "disable_cuda_graph": True,
+            "speculative_algorithm": "DRAMA3_PAIR",
+        },
+    )
+
+    builder.validate_before_infrastructure(server_args)
+    algorithm = SpeculativeAlgorithm.from_string(server_args.speculative_algorithm)
+
+    assert algorithm.name == "DRAMA3_PAIR"
+    assert not algorithm.has_draft_kv()
+    assert server_args.speculative_num_draft_tokens == 1
+    assert server_args.speculative_num_steps == 0
+    assert builder.infra_kwargs()["supports_speculative_decoding"] is True
 
 
 def test_engine_context_must_fit_the_tower_rope_table(
