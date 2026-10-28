@@ -75,8 +75,15 @@ class OfflinePairRequest:
         self.request = request
         self.cache_slots = cache_slots
         self.device = cache_slots.device
+        request_slot = getattr(request, "req_pool_idx", None)
+        if request_slot is None:
+            assert request.kv is not None and request.kv.req_pool_idx is not None
+            request_slot = request.kv.req_pool_idx
+        else:
+            pass
+        self.request_slot = request_slot
         self.request_indices = torch.tensor(
-            [request.req_pool_idx], dtype=torch.int64, device=self.device
+            [request_slot], dtype=torch.int64, device=self.device
         )
         self.token_pool = attention_backend.token_to_kv_pool
         self.request_pool = attention_backend.req_to_token_pool
@@ -85,7 +92,7 @@ class OfflinePairRequest:
         self.request_pool.mamba_pool.clear_slots(
             self.request_pool.get_mamba_indices(self.request_indices)
         )
-        self.request_pool.req_to_token[request.req_pool_idx, : cache_slots.numel()] = (
+        self.request_pool.req_to_token[request_slot, : cache_slots.numel()] = (
             cache_slots.to(torch.int32)
         )
         for layer_id in self.token_pool.full_attention_layer_id_mapping:
