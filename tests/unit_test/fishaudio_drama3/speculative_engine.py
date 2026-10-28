@@ -155,12 +155,16 @@ def check_case(
     )
     assert hidden_error <= relative_rms_limit, "block/step hidden divergence"
     assert logits_error <= relative_rms_limit, "block/step logits divergence"
-    result = verify_pair_block(
+    expected_frames = torch.cat([step.frame for step in serial_steps[:consumed]])
+    semantic_logits = request.target_logits(
+        block.positions, eos_position=eos_position
+    )
+    extend_cache = request.snapshot()
+    verify_rng = torch.cuda.get_rng_state(request.device)
+    acceptance = verify_pair_block(
         decoder,
         block,
-        semantic_logits=request.target_logits(
-            block.positions, eos_position=eos_position
-        ),
+        semantic_logits=semantic_logits,
         hidden_states=hidden_states,
         previous_main_tokens=window,
         temperature=request.temperature,
@@ -168,14 +172,35 @@ def check_case(
         top_p=request.top_p,
         attention_steps=request.tower_steps(block.input_frames, start),
     )
-    expected_frames = torch.cat([step.frame for step in serial_steps[:consumed]])
-    assert result.consumed_input_count == consumed
+    assert acceptance.consumed_input_count == consumed
     expected_matches = consumed - int(
         case.mismatch_row is not None
         or (case.eos_row is not None and not case.predict_eos)
     )
-    assert result.matched_pair_count == expected_matches
-    assert result.reached_eos == (case.eos_row is not None)
+    assert acceptance.matched_pair_count == expected_matches
+    assert acceptance.reached_eos == (case.eos_row is not None)
+    # Extend and decode hiddens differ by one bf16 ulp, which can move an uncommitted residual code. Pair columns still come from the extend hidden; exact recovery replays the decode hidden.
+    torch.testing.assert_close(
+        acceptance.frames[:, [0, 2]],
+        expected_frames[:, [0, 2]],
+        rtol=0,
+        atol=0,
+    )
+    extend_cache.restore()
+    torch.cuda.set_rng_state(verify_rng, request.device)
+    recovery_hidden = hidden_states.clone()
+    recovery_hidden[:consumed] = reference_hidden
+    result = verify_pair_block(
+        decoder,
+        block,
+        semantic_logits=semantic_logits,
+        hidden_states=recovery_hidden,
+        previous_main_tokens=window,
+        temperature=request.temperature,
+        top_k=request.top_k,
+        top_p=request.top_p,
+        attention_steps=request.tower_steps(block.input_frames, start),
+    )
     torch.testing.assert_close(result.frames, expected_frames, rtol=0, atol=0)
     torch.testing.assert_close(
         result.ras_window, serial_steps[consumed - 1].ras_window, rtol=0, atol=0

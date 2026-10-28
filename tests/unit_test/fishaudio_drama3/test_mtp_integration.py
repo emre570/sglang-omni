@@ -2457,11 +2457,12 @@ def test_engine_registers_drama3_pair_speculative_worker(tmp_path: Path) -> None
 
     builder.validate_before_infrastructure(server_args)
     algorithm = SpeculativeAlgorithm.from_string(server_args.speculative_algorithm)
+    resolved = resolved_view(server_args)
 
     assert algorithm.name == "DRAMA3_PAIR"
     assert not algorithm.has_draft_kv()
-    assert server_args.speculative_num_draft_tokens == 1
-    assert server_args.speculative_num_steps == 0
+    assert resolved.speculative_num_draft_tokens == 1
+    assert resolved.speculative_num_steps == 0
     assert builder.infra_kwargs()["supports_speculative_decoding"] is True
 
 
