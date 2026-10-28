@@ -24,6 +24,7 @@ from pydantic import JsonValue
 from websockets.asyncio.server import ServerConnection
 from websockets.http11 import Request, Response
 
+import benchmarks.duplex.client as client
 from benchmarks.duplex.client import (
     ADMISSION_RETRIES,
     PACKET_MS,
@@ -111,6 +112,95 @@ def test_client_records_complete_native_session(tmp_path: Path) -> None:
     )
 
     assert "response.cancel" not in [event["type"] for event in peer.received]
+
+
+NON_ASCII_TRANSCRIPT = "fixturé 你好"
+
+
+class FrameStylePeer(DuplexPeer):
+    async def send(self, websocket: ServerConnection, event: dict) -> None:
+        event["event_id"] = f"server_{len(self.sent)}"
+        event = json.loads(
+            json.dumps(event).replace('"fixture"', json.dumps(NON_ASCII_TRANSCRIPT))
+        )
+        self.sent.append(event)
+        style = len(self.sent) % 3
+        if style == 0:
+            frame = json.dumps(event, indent=1)
+        elif style == 1:
+            frame = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        else:
+            frame = json.dumps(event)
+        await websocket.send(frame)
+
+
+def test_trace_lines_embed_frames_and_reencode_the_ones_they_cannot(
+    tmp_path: Path,
+) -> None:
+    peer = FrameStylePeer()
+    trace_path = tmp_path / "trace.jsonl"
+    records = asyncio.run(capture_session(peer, trace_path))
+
+    assert evaluate_trace(records)["status"] == "pass"
+    assert [r["event"] for r in records if r["direction"] == "receive"] == peer.sent
+    assert [r["event"] for r in records if r["direction"] == "send"] == peer.received
+    trace = trace_path.read_bytes()
+    assert trace.isascii()
+    assert any(
+        NON_ASCII_TRANSCRIPT in json.dumps(event, ensure_ascii=False)
+        for event in peer.sent
+    )
+    lines = trace.decode("ascii").splitlines()
+    assert len(lines) == len(peer.sent) + len(peer.received)
+    for line, record in zip(lines, records):
+        if record["direction"] == "send":
+            assert line == json.dumps(record)
+        else:
+            pass
+
+
+class StallingBase64:
+    def __init__(self, clock: StalledClock) -> None:
+        self.clock = clock
+
+    def b64encode(self, data: bytes) -> bytes:
+        if not self.clock.offset_s:
+            self.clock.offset_s = FIRST_APPEND_STALL_S
+        else:
+            pass
+        return base64.b64encode(data)
+
+
+class StalledClock:
+    sleep = staticmethod(time.sleep)
+
+    def __init__(self) -> None:
+        self.offset_s = 0.0
+
+    def perf_counter(self) -> float:
+        return time.perf_counter() + self.offset_s
+
+
+FIRST_APPEND_STALL_S = 0.15
+
+
+def test_a_late_first_append_shifts_the_whole_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replay measures from the first append, so the deadlines must start there too."""
+    clock = StalledClock()
+    monkeypatch.setattr(client, "time", clock)
+    monkeypatch.setattr(client, "base64", StallingBase64(clock))
+    asyncio.run(capture_session(DuplexPeer(), tmp_path / "trace.jsonl"))
+
+    assert clock.offset_s == FIRST_APPEND_STALL_S
+    appends = json.loads((tmp_path / SEND_RECEIPTS_FILE).read_text())["appends"]
+    assert len(appends) == FIXTURE_PACKETS
+    deviations_s = [
+        append["start_s"] - appends[0]["start_s"] - append["seq"] * PACKET_MS / 1000
+        for append in appends
+    ]
+    assert max(abs(value) for value in deviations_s) < PACKET_MS / 1000 / 2
 
 
 @pytest.mark.parametrize(

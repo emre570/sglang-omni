@@ -132,6 +132,14 @@ def settle_close(closed: asyncio.Future[None], failure: OSError | None) -> None:
         closed.set_exception(failure)
 
 
+def reject_constant(constant: str) -> float:
+    raise ValueError(f"Out of range float values are not JSON compliant: {constant}")
+
+
+# A frame lands in the trace as received, so it must already be strict JSON.
+SERVER_EVENT_DECODER = json.JSONDecoder(parse_constant=reject_constant)
+
+
 # note (kangwenqiao): A write can wait hundreds of ms for disk writeback of its page,
 # so it leaves the loop that paces every session. Every other thread that wakes takes
 # the GIL from that loop, so one thread writes on a fixed period for all sessions.
@@ -321,6 +329,30 @@ async def run_session(
             )
             return observed_time_s
 
+        # note (edwingao28): Embedding the frame saves a second encode on the pacing
+        # loop; a non-ASCII or multi-line frame is encoded again to keep ASCII lines.
+        def record_frame(
+            direction: Literal["send", "receive"],
+            frame: str,
+            event: dict[str, JsonValue],
+            observed_time_s: float,
+        ) -> None:
+            if not frame.isascii() or "\n" in frame or "\r" in frame:
+                line = json.dumps(
+                    {
+                        "direction": direction,
+                        "time_s": observed_time_s,
+                        "event": event,
+                    },
+                    allow_nan=False,
+                )
+            else:
+                line = (
+                    f'{{"direction": "{direction}", "time_s": {observed_time_s!r}, '
+                    f'"event": {frame}}}'
+                )
+            TRACE_WRITER.write_line(trace_file, line + "\n")
+
         async def admit() -> websockets.ClientConnection:
             attempt = 0
             while True:
@@ -387,8 +419,10 @@ async def run_session(
                         event["sglang"] = sglang
                     else:
                         pass
-                    send_started_s = record("send", event)
-                    await websocket.send(json.dumps(event))
+                    send_started_s = time.perf_counter()
+                    frame = json.dumps(event, allow_nan=False)
+                    record_frame("send", frame, event, send_started_s)
+                    await websocket.send(frame)
                     if event_type == "input_audio_buffer.append":
                         assert sglang is not None
                         receipts.append(
@@ -419,8 +453,10 @@ async def run_session(
                 async def receive() -> None:
                     nonlocal fatal
                     async for frame in websocket:
+                        received_s = time.perf_counter()
                         try:
-                            event = json.loads(frame)
+                            text = frame if isinstance(frame, str) else frame.decode()
+                            event = SERVER_EVENT_DECODER.decode(text)
                             if not isinstance(event, dict):
                                 raise ValueError("server event must be a JSON object")
                             else:
@@ -430,7 +466,7 @@ async def run_session(
                                 raise ValueError("server event type must be a string")
                             else:
                                 pass
-                            record("receive", event)
+                            record_frame("receive", text, event, received_s)
                         except ValueError as exc:
                             raise ValueError(
                                 "malformed server frame "
@@ -478,18 +514,22 @@ async def run_session(
                         else:
                             pass
                         streamed = True
-                        start_s = time.perf_counter()
                         for sequence, byte_offset in enumerate(
                             range(0, len(pcm), PACKET_BYTES)
                         ):
-                            await asyncio.sleep(
-                                max(
-                                    0.0,
-                                    start_s
-                                    + sequence * PACKET_MS / 1000
-                                    - time.perf_counter(),
+                            # note (edwingao28): Replay measures pacing from the
+                            # first append's send, so the deadlines start there too.
+                            if receipts:
+                                await asyncio.sleep(
+                                    max(
+                                        0.0,
+                                        receipts[0]["start_s"]
+                                        + sequence * PACKET_MS / 1000
+                                        - time.perf_counter(),
+                                    )
                                 )
-                            )
+                            else:
+                                pass
                             if aborted.is_set():
                                 streamed = False
                                 break

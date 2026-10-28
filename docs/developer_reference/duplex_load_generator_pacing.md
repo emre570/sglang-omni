@@ -77,12 +77,56 @@ A 30 s session ends near the 30 s writeback age, so 30 s runs see fewer disk sta
 
 On a host like this one, keep a client process at or below 128 sessions and spread more sessions over several processes, for example 4 processes of 32. Above 128 sessions per process, or at 4 × 64, check the pacing of every run, as `benchmarks/duplex/serving.py` does for every level: runs in both layouts went past 80 ms here. These limits come from one host and the mock server, see the limitations.
 
+## Recording path
+
+The study above drove `run_session` directly. The recorder that produces benchmark runs, `run_samples` in `benchmarks/duplex/v15_runner.py`, does more on the same process, and on a 2 CPU host it still missed the 80 ms tolerance at 24 and 32 sessions with the writer thread in place.
+
+### Causes
+
+- Post-processing ran in threads of the recording process. When a session ended, `replay_run`, the `report.json` write and output reconstruction parsed the whole trace and validated it with pydantic. Long C calls and generation 2 garbage collections over the large heap held the GIL for 100 ms and more, the largest collection pause measured was 145 ms, and every open session missed a packet slot at the same moment. The recorder used only 0.15–0.36 cores, so it was not short of CPU.
+- `run.json` was dumped with indentation on the event loop at every session end, about 5 ms at 64 sessions and growing with the run.
+- The client scheduled packets from a start time taken before its send loop, while the pacing check measures from the first append. A late first packet therefore made every later packet look early by the same amount.
+- Every sent event was serialized twice, once for the socket and once for the trace, and every received audio event was decoded and encoded again for the trace.
+
+Checked and left unchanged: `websocket.send()` back-pressure, p99 at or below 0.25 ms as measured above; per-packet logging, there is none; the receive loop, whose run without yielding is bounded by the 16 frame queue; and the sleep, which was already on an absolute deadline.
+
+### Changes
+
+- Post-processing runs in a pool of spawned processes, at most 4 and a quarter of the CPUs the recorder may use, started before the first session and run at `nice` 10. Workers return small summaries. `run_samples` takes a `postprocess` executor for tests and closes the pool it owns.
+- `run.json` checkpoints while recording are coalesced and written by a thread from a snapshot taken on the loop. The final write is unchanged.
+- The garbage collector freezes the objects that exist before recording starts, so collections do not walk them.
+- Packet N is scheduled at the actual send of packet 0 plus N times 80 ms, the origin the pacing check uses.
+- A sent event is encoded once and its trace line built from that frame. A received frame is written to the trace as it arrived unless it is not ASCII or contains a line break, in which case it is encoded again.
+- `run.json` gains `load.client_loop`: the largest event-loop lag seen by a 10 ms monitor and the number of lags over 80 ms, so a run can show whether the client stalled.
+
+### Results
+
+`pacing_probe.py native-mock` serves the native protocol and streams 22.05 kHz audio back for every input unit, in bursts of `--burst-units` units; `record` drives `run_samples` with a synthetic dataset of 4 subsets, 20–60 s inputs and both variants of each sample. Each run records 2 × concurrency sessions. Host: 2 CPUs and 7 GB of memory shared by the mock, the recorder and its workers. P99 is the largest of the per-run p99 values.
+
+| Tree | Concurrency, burst | Unqualified runs | Sessions with a violation | Late packets | p99 (ms) | Maximum (ms) |
+|---|---|---|---|---|---|---|
+| Before | 24, 1 | 3 of 3 | 66 of 144 | 81 | 22.8 | 125 [119–136] |
+| After | 24, 1 | 0 of 3 | 0 of 144 | 0 | 3.8 | 33 [24–42] |
+| After | 24, 25 | 0 of 2 | 0 of 96 | 0 | 8.0 | 27 [25–28] |
+| Before | 32, 1 | 3 of 3 | 53 of 192 | 74 | 24.1 | 100 [90–134] |
+| After | 32, 1 | 0 of 3 | 0 of 192 | 0 | 5.2 | 22 [16–33] |
+| Before | 32, 25 | 1 of 1 | 11 of 64 | 16 | 27.3 | 109 |
+| After | 32, 25 | 0 of 2 | 0 of 128 | 0 | 10.2 | 28 [26–30] |
+| Before | 64, 1 | 3 of 3 | 348 of 384 | 3,200 | 191.3 | 169 [168–445] |
+| After | 64, 1 | 0 of 3 | 0 of 384 | 0 | 11.0 | 42 [27–52] |
+| After | 64, 25 | 0 of 2 | 0 of 256 | 0 | 18.5 | 59 [39–80] |
+| After | 128, 1 | 0 of 1 | 0 of 256 | 0 | 17.8 | 53 |
+
+The recorder process used 0.07–0.24 cores after the change, not counting its post-processing workers. The 80 ms maximum at 64 sessions with bursts came while the mock's own loop stalled for 180 ms on the shared CPUs, so on this host 64 sessions with bursty replies is near the limit. A unit test makes replay hold the GIL for 1.5 s if it runs in the recording process: post-processing in threads fails it with a late packet, and the default process pool passes it.
+
 ## Tool
 
-[benchmarks/duplex/pacing_probe.py](../../benchmarks/duplex/pacing_probe.py) has three subcommands.
+[benchmarks/duplex/pacing_probe.py](../../benchmarks/duplex/pacing_probe.py) has five subcommands.
 
 - `mock` serves the native session protocol with no model. It replies to every input packet with `--replies-per-append` events, 3 by default: an audio delta, text deltas and a `sglang.unit.done`. It records when each packet arrives and its own event-loop lag, and writes these statistics on SIGINT.
 - `run` opens `--concurrency` sessions in one process through `run_session` and streams `--duration` seconds of silence. It writes raw samples to `samples.json` and a summary to `summary.json`, then deletes the session traces, which reach about 10 MB per 90 s session.
+- `native-mock` serves the native session protocol used by `run_samples` and streams audio back for every input unit at `--output-sample-rate`, 22.05 kHz by default, grouped in bursts of `--burst-units` units, with transcript deltas.
+- `record` runs `run_samples` against a server with a synthetic dataset and writes a summary of pacing violations, late packets, pacing and loop-lag percentiles, garbage collection pauses and CPU use.
 - `merge` pools the raw samples of `run` processes that streamed at the same time. Percentiles are over the pooled packets. `perf_counter` is shared by the processes of one host, so overlaps and late-packet times line up across processes.
 
 The summary reports pacing deviation percentiles, packets over 80 ms, sessions with a violation, incomplete sessions, `websocket_send_*` and `append_span_*` durations, event-loop lag, CPU per process in cores, peak resident memory and the peak number of overlapping input streams. `--inject-stall-ms` blocks the event loop once halfway through the run: with 8 sessions, a 60 ms stall raised no violation and a 150 ms stall raised one in every session.
@@ -100,6 +144,17 @@ wait "${run_pids[@]}"
 kill -INT $mock_pid
 wait $mock_pid
 python -m benchmarks.duplex.pacing_probe merge out/p0 out/p1 out/p2 out/p3 --output out/merged
+```
+
+The recording path is probed the same way:
+
+```bash
+python -m benchmarks.duplex.pacing_probe native-mock --port 8766 --stats-output mock.json > mock.log &
+mock_pid=$!
+until grep -q listening mock.log; do sleep 0.2; done
+python -m benchmarks.duplex.pacing_probe record --url ws://127.0.0.1:8766/v1/realtime --concurrency 32 --per-subset 8 --output out/record
+kill -INT $mock_pid
+wait $mock_pid
 ```
 
 The 5 ms process sampler and the run scripts used for this study are not in the repository.
