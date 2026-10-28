@@ -28,6 +28,10 @@ from sglang_omni.models.fishaudio_drama3.sampling import (
     sample_top_k_top_p,
 )
 from sglang_omni.models.fishaudio_drama3.sampling_kernels import CodebookSampler
+from sglang_omni.models.fishaudio_drama3.speculative import (
+    PairProposalBlock,
+    verify_pair_block,
+)
 from sglang_omni.models.fishaudio_drama3.weights import (
     checkpoint_part,
     expected_parameter_shards,
@@ -690,6 +694,199 @@ def test_frame_embeddings() -> None:
         shared_input[1], reference_codebook_sum(checkpoint, frames[1], range(2, 4))
     )
     torch.testing.assert_close(shared_input[2], torch.zeros(DIM))
+
+
+def test_pair_proposal_embedding_dependency() -> None:
+    decoder = loaded_decoder(random_checkpoint(seed=2), torch.float32, "cpu")
+    frames = torch.tensor([[80, 0, 2, 4, 5], [81, 1, 3, 6, 7], [82, 2, 4, 1, 2]])
+    pairs = torch.tensor([[81, 3], [82, 4], [83, 5]])
+    block = PairProposalBlock.build(
+        decoder, frames[:1], pairs, start_position=7, eos_token_id=EOS_TOKEN_ID
+    )
+    text_embeddings = torch.randn(3, DIM, generator=torch.Generator().manual_seed(3))
+    torch.testing.assert_close(
+        decoder.embed_backbone(block.input_frames, text_embeddings),
+        decoder.embed_backbone(frames, text_embeddings),
+        rtol=0,
+        atol=0,
+    )
+    assert not torch.equal(
+        decoder.shared_input(block.input_frames)[1:], decoder.shared_input(frames)[1:]
+    )
+    pairs.fill_(0)
+    frames.fill_(0)
+    assert block.pairs[0].tolist() == [81, 3]
+    assert block.input_frames[0].tolist() == [80, 0, 2, 4, 5]
+    assert block.positions.tolist() == [7, 8, 9]
+
+
+@pytest.mark.parametrize("backbone_codebook_count", [0, 2])
+def test_pair_proposals_reject_incomplete_dependency(
+    backbone_codebook_count: int,
+) -> None:
+    decoder = loaded_decoder(random_checkpoint(seed=2), torch.float32, "cpu")
+    decoder.backbone_codebook_count = backbone_codebook_count
+    with pytest.raises(ValueError, match="exactly one backbone codebook"):
+        PairProposalBlock.build(
+            decoder,
+            torch.tensor([[80, 0, 2, 4, 5]]),
+            torch.tensor([[81, 3]]),
+            start_position=7,
+            eos_token_id=EOS_TOKEN_ID,
+        )
+
+
+@pytest.mark.parametrize(
+    ("block_length", "mismatch_row", "pair_column", "eos_row"),
+    [(1, None, 0, None), (2, None, 0, None), (4, None, 0, None)]
+    + [(4, row, column, None) for row in range(4) for column in range(2)]
+    + [(4, None, 0, row) for row in (0, 2, 3)]
+    + [(4, 2, 0, 2)],
+)
+def test_pair_verification_matches_sequential_tower(
+    block_length: int,
+    mismatch_row: int | None,
+    pair_column: int,
+    eos_row: int | None,
+) -> None:
+    """Pair rejection must retain the correction and its tower state, including RAS."""
+    decoder = loaded_decoder(random_checkpoint(seed=2), torch.float32, "cpu")
+    anchor = torch.tensor([[SEMANTIC_BEGIN_ID, 0, 2, 4, 5]])
+    initial_window = torch.full((1, WINDOW_FRAMES), SEMANTIC_BEGIN_ID)
+    hidden_states = torch.randn(
+        block_length + 1, DIM, generator=torch.Generator().manual_seed(4)
+    )
+    candidate_ids = decoder.main_token_candidate_ids
+    logits = torch.zeros(block_length + 1, candidate_ids.numel())
+    logits[:, candidate_ids == EOS_TOKEN_ID] = -torch.inf
+    logits[:, candidate_ids == SEMANTIC_BEGIN_ID] = 0.5
+    if eos_row is not None:
+        logits[eos_row].fill_(-torch.inf)
+        logits[eos_row, candidate_ids == EOS_TOKEN_ID] = 0
+    temperature = torch.ones(1)
+    top_k = torch.ones(1, dtype=torch.int64)
+    top_p = torch.ones(1)
+    baseline_attention = DenseAttention(
+        head_count=HEAD_COUNT, kv_head_count=KV_HEAD_COUNT, head_dim=HEAD_DIM
+    )
+    verification_attention = DenseAttention(
+        head_count=HEAD_COUNT, kv_head_count=KV_HEAD_COUNT, head_dim=HEAD_DIM
+    )
+    target_frames: list[torch.Tensor] = []
+    target_windows: list[torch.Tensor] = []
+    rng_states: list[torch.Tensor] = []
+    input_frame = anchor
+    window = initial_window.clone()
+    start_position = 7
+    with (
+        torch.inference_mode(),
+        torch_fused_op_backend(),
+        torch.random.fork_rng(devices=[]),
+    ):
+        torch.manual_seed(23)
+        initial_rng = torch.get_rng_state()
+        for row in range(block_length + 1):
+            baseline_attention.bind(["request"], [start_position + row])
+            input_frame = decoder.decode_step(
+                logits[row : row + 1],
+                hidden_states[row : row + 1],
+                torch.tensor([start_position + row]),
+                input_frame,
+                window,
+                temperature,
+                top_k,
+                top_p,
+                baseline_attention,
+            )
+            target_frames.append(input_frame)
+            window = torch.cat((window[:, 1:], input_frame[:, :1]), dim=1)
+            target_windows.append(window)
+            rng_states.append(torch.get_rng_state())
+            if int(input_frame[0, 0]) == EOS_TOKEN_ID:
+                break
+        proposal_count = block_length if eos_row is None else eos_row + 1
+        pairs = torch.cat(target_frames[:proposal_count])[:, [0, 2]].clone()
+        if eos_row is not None and mismatch_row is None:
+            pairs[eos_row, 1] = (pairs[eos_row, 1] + 1) % CODEBOOK_SIZE
+        if mismatch_row is not None:
+            if pair_column == 0:
+                original_id = int(pairs[mismatch_row, 0])
+                pairs[mismatch_row, 0] = (
+                    SEMANTIC_BEGIN_ID
+                    + (original_id - SEMANTIC_BEGIN_ID + 1) % CODEBOOK_SIZE
+                )
+            else:
+                pairs[mismatch_row, 1] = (pairs[mismatch_row, 1] + 1) % CODEBOOK_SIZE
+        if eos_row is not None and mismatch_row == eos_row:
+            pairs = torch.cat(
+                (
+                    pairs,
+                    torch.tensor([[SEMANTIC_BEGIN_ID, 0]]).repeat(
+                        block_length - proposal_count, 1
+                    ),
+                )
+            )
+            proposal_count = block_length
+        block = PairProposalBlock.build(
+            decoder,
+            anchor,
+            pairs,
+            start_position=start_position,
+            eos_token_id=EOS_TOKEN_ID,
+        )
+        visited_positions: list[int] = []
+
+        def attention_steps() -> Iterator[DenseAttention]:
+            for position in block.positions.tolist():
+                visited_positions.append(position)
+                verification_attention.bind(["request"], [position])
+                yield verification_attention
+
+        torch.set_rng_state(initial_rng)
+        result = verify_pair_block(
+            decoder,
+            block,
+            semantic_logits=logits[:proposal_count],
+            hidden_states=hidden_states[:proposal_count],
+            previous_main_tokens=initial_window,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            attention_steps=attention_steps(),
+        )
+        consumed = proposal_count if mismatch_row is None else mismatch_row + 1
+        assert result.consumed_input_count == consumed
+        assert result.matched_pair_count == (
+            consumed if mismatch_row is None else consumed - 1
+        )
+        assert result.reached_eos == (eos_row is not None and consumed == eos_row + 1)
+        assert visited_positions == list(
+            range(start_position, start_position + consumed)
+        )
+        torch.testing.assert_close(result.frames, torch.cat(target_frames[:consumed]))
+        torch.testing.assert_close(result.ras_window, target_windows[consumed - 1])
+        assert torch.equal(torch.get_rng_state(), rng_states[consumed - 1])
+        assert bool((initial_window == SEMANTIC_BEGIN_ID).all())
+        if not result.reached_eos:
+            verification_attention.bind(["request"], [start_position + consumed])
+            next_frame = decoder.decode_step(
+                logits[consumed : consumed + 1],
+                hidden_states[consumed : consumed + 1],
+                torch.tensor([start_position + consumed]),
+                result.frames[-1:],
+                result.ras_window,
+                temperature,
+                top_k,
+                top_p,
+                verification_attention,
+            )
+            torch.testing.assert_close(next_frame, target_frames[consumed])
+        for cache_key, entries in verification_attention.entries.items():
+            expected_entries = baseline_attention.entries[cache_key][: len(entries)]
+            for actual, expected in zip(entries, expected_entries, strict=True):
+                assert actual[0] == expected[0]
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                torch.testing.assert_close(actual[2], expected[2], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

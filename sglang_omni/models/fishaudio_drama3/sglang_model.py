@@ -43,6 +43,7 @@ from sglang_omni.models.fishaudio_drama3.model_inputs import (
     StepExchange,
     next_frame_labels,
 )
+from sglang_omni.models.fishaudio_drama3.speculative import PairProposalBlock
 from sglang_omni.models.fishaudio_drama3.tower_prefill import (
     Drama3TowerPrefill,
     PagedTowerAttention,
@@ -71,7 +72,7 @@ __all__ = [
 class Drama3Backbone(Qwen3_5MoeForCausalLM):
     tower_prefill: Drama3TowerPrefill | None = None
 
-    def forward(
+    def forward_backbone(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -89,6 +90,25 @@ class Drama3Backbone(Qwen3_5MoeForCausalLM):
             input_deepstack_embeds,
         )
         assert isinstance(hidden_states, torch.Tensor)
+        return hidden_states
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor | None = None,
+        pp_proxy_tensors: PPProxyTensors | None = None,
+        input_deepstack_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.forward_backbone(
+            input_ids,
+            positions,
+            forward_batch,
+            input_embeds,
+            pp_proxy_tensors,
+            input_deepstack_embeds,
+        )
         tower_prefill = self.tower_prefill
         if forward_batch.forward_mode != ForwardMode.EXTEND:
             return hidden_states
@@ -329,6 +349,45 @@ class Drama3ForCausalLM(nn.Module):
         )
         return hidden_states, self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
+        )
+
+    @torch.inference_mode()
+    def proposal_backbone_logits(
+        self,
+        block: PairProposalBlock,
+        forward_batch: ForwardBatch,
+    ) -> tuple[torch.Tensor, LogitsProcessorOutput]:
+        """Offline EXTEND on disposable state; skips tower prefill and retains all logits.
+
+        The caller owns backbone KV, convolution and recurrent state recovery.
+        """
+        if self.audio_decoder.backbone_codebook_count != 1:
+            raise ValueError("pair proposals require exactly one backbone codebook")
+        else:
+            pass
+        assert forward_batch.forward_mode == ForwardMode.EXTEND
+        assert forward_batch.batch_size == 1
+        assert forward_batch.extend_num_tokens == block.pairs.shape[0]
+        assert torch.equal(forward_batch.input_ids, block.input_frames[:, 0])
+        assert torch.equal(forward_batch.positions, block.positions)
+        assert int(forward_batch.seq_lens[0]) == int(block.positions[-1]) + 1
+        input_embeds = self.audio_decoder.embed_backbone(
+            block.input_frames, self.model.embed_tokens(block.input_frames[:, 0])
+        )
+        hidden_states = self.model.forward_backbone(
+            forward_batch.input_ids,
+            block.positions,
+            forward_batch,
+            input_embeds=input_embeds,
+        )
+        logits_batch = dataclasses.replace(
+            forward_batch,
+            forward_mode=ForwardMode.TARGET_VERIFY,
+            return_logprob=False,
+            next_token_logits_buffer=None,
+        )
+        return hidden_states, self.logits_processor(
+            forward_batch.input_ids, hidden_states, self.lm_head, logits_batch
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:

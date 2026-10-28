@@ -70,6 +70,7 @@ from sglang_omni.models.fishaudio_drama3.sampling import (
 )
 from sglang_omni.models.fishaudio_drama3.sampling_kernels import PHILOX_SEED_MODULUS
 from sglang_omni.models.fishaudio_drama3.sglang_model import (
+    Drama3Backbone,
     Drama3DecodeBuffers,
     Drama3ForCausalLM,
     Drama3StepInputs,
@@ -77,6 +78,7 @@ from sglang_omni.models.fishaudio_drama3.sglang_model import (
     StepExchange,
     next_frame_labels,
 )
+from sglang_omni.models.fishaudio_drama3.speculative import PairProposalBlock
 from sglang_omni.models.fishaudio_drama3.tower_kernels import (
     FUSED_KERNELS,
     MAX_FUSED_ROWS,
@@ -2233,6 +2235,75 @@ def test_placeholder_rows_end_like_first_writes_and_a_dense_recompute() -> None:
         torch.testing.assert_close(
             cached, tower_cache(dense_attention)[slot], rtol=0, atol=1e-4
         )
+
+
+def test_proposal_backbone_skips_tower_prefill() -> None:
+    backbone = Drama3Backbone.__new__(Drama3Backbone)
+    torch.nn.Module.__init__(backbone)
+    tower_prefill = Mock(spec=Drama3TowerPrefill)
+    backbone.tower_prefill = tower_prefill
+    forward_batch = Mock(spec=ForwardBatch)
+    forward_batch.forward_mode = ForwardMode.EXTEND
+    input_ids = torch.tensor([80, 81])
+    positions = torch.tensor([7, 8])
+    hidden_states = torch.randn(2, DIM)
+    with patch.object(
+        sglang_model.Qwen3_5MoeForCausalLM, "forward", return_value=hidden_states
+    ):
+        assert (
+            backbone.forward_backbone(input_ids, positions, forward_batch)
+            is hidden_states
+        )
+        tower_prefill.run.assert_not_called()
+        assert backbone(input_ids, positions, forward_batch) is hidden_states
+        tower_prefill.run.assert_called_once_with(
+            hidden_states, positions, forward_batch
+        )
+
+
+def test_proposal_backbone_keeps_all_logit_rows() -> None:
+    decoder = loaded_decoder(random_checkpoint(seed=2), torch.float32, "cpu")
+    block = PairProposalBlock.build(
+        decoder,
+        torch.tensor([[80, 0, 2, 4, 5]]),
+        torch.tensor([[81, 3], [82, 4]]),
+        start_position=7,
+        eos_token_id=EOS_TOKEN_ID,
+    )
+    model = ConfigOnlyModel(FishOmniConfig(**fish_config_dict()))
+    model.audio_decoder = decoder
+    model.model = Mock(spec=Drama3Backbone)
+    model.lm_head = torch.nn.Linear(DIM, decoder.main_token_candidate_ids.numel())
+    hidden_states = torch.randn(2, DIM)
+    text_embeddings = torch.randn(2, DIM)
+    model.model.embed_tokens = Mock(return_value=text_embeddings)
+    model.model.forward_backbone.return_value = hidden_states
+    logits_output = LogitsProcessorOutput(next_token_logits=torch.randn(2, 9))
+    model.logits_processor = Mock(return_value=logits_output)
+    forward_batch = ForwardBatch(
+        forward_mode=ForwardMode.EXTEND,
+        batch_size=1,
+        input_ids=block.input_frames[:, 0],
+        req_pool_indices=torch.tensor([0]),
+        seq_lens=torch.tensor([9]),
+        out_cache_loc=torch.tensor([7, 8]),
+        seq_lens_sum=9,
+        positions=block.positions,
+        extend_num_tokens=2,
+    )
+    actual_hidden, actual_logits = model.proposal_backbone_logits(block, forward_batch)
+    assert actual_hidden is hidden_states
+    assert actual_logits is logits_output
+    torch.testing.assert_close(
+        model.model.forward_backbone.call_args.kwargs["input_embeds"],
+        decoder.embed_backbone(block.input_frames, text_embeddings),
+    )
+    logits_batch = model.logits_processor.call_args.args[3]
+    assert logits_batch.forward_mode == ForwardMode.TARGET_VERIFY
+    assert not logits_batch.return_logprob
+    assert logits_batch.next_token_logits_buffer is None
+    assert forward_batch.forward_mode == ForwardMode.EXTEND
+    model.model.assert_not_called()
 
 
 def test_model_rejects_a_tower_that_cannot_share_the_backbone_pool() -> None:
