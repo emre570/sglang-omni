@@ -221,6 +221,7 @@
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_tts.html">MOSS-TTS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/nemotron3_5_asr.html">Nemotron 3.5 ASR</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cookbook/nemotron_transcribe.html">Nemotron Transcribe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/fishaudio_s2_pro.html">Fish Audio S2-Pro</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
@@ -630,35 +631,39 @@
 <td><p>ASR</p></td>
 <td><p>Multilingual RNN-T transcription; internal native PCM streaming runtime (see <a class="reference external" href="cookbook/nemotron3_5_asr.html">cookbook</a>)</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">OpenMOSS-Team/MOSS-Transcribe-Diarize</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/nvidia/Nemotron-3.5-Transcribe-30B-A4B">nvidia/Nemotron-3.5-Transcribe-30B-A4B</a></p></td>
+<td><p>ASR</p></td>
+<td><p>Whole-file transcription with native speech and speaker-fusion encoders (see <a class="reference external" href="cookbook/nemotron_transcribe.html">cookbook</a>)</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize">OpenMOSS-Team/MOSS-Transcribe-Diarize</a></p></td>
 <td><p>ASR</p></td>
 <td><p>Multi-speaker transcription + diarization + timestamps</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/nvidia/Nemotron-3-Diarization">nvidia/Nemotron-3-Diarization</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/nvidia/Nemotron-3-Diarization">nvidia/Nemotron-3-Diarization</a></p></td>
 <td><p>Diarization</p></td>
 <td><p>Up to eight overlapping speakers for uploads and live audio (see <a class="reference external" href="cookbook/nemotron_diarization.html">cookbook</a>)</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/openai/whisper-large-v3">openai/whisper-large-v3</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/openai/whisper-large-v3">openai/whisper-large-v3</a></p></td>
 <td><p>ASR</p></td>
 <td><p>Experimental transcription and speech-to-English translation routes; see the <a class="reference external" href="basic_usage/audio_translations.html">audio translation support matrix</a></p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct">Qwen/Qwen3-Omni-30B-A3B-Instruct</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct">Qwen/Qwen3-Omni-30B-A3B-Instruct</a></p></td>
 <td><p>Omni</p></td>
 <td><p>Text, image, audio, video → text + audio</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/openbmb/MiniCPM-o-4_5">openbmb/MiniCPM-o-4_5</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/openbmb/MiniCPM-o-4_5">openbmb/MiniCPM-o-4_5</a></p></td>
 <td><p>Omni</p></td>
 <td><p>Text, image, audio, video → text + audio</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/Ming-flash-omni-2.0">inclusionAI/Ming-flash-omni-2.0</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/Ming-flash-omni-2.0">inclusionAI/Ming-flash-omni-2.0</a></p></td>
 <td><p>Omni</p></td>
 <td><p>Streaming TTS</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/Ming-3.0-audio-flash">inclusionAI/Ming-3.0-audio-flash</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/Ming-3.0-audio-flash">inclusionAI/Ming-3.0-audio-flash</a></p></td>
 <td><p>Omni</p></td>
 <td><p>Transcription, audio chat, and 44.1 kHz speech</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/LLaDA2.0-Uni">inclusionAI/LLaDA2.0-Uni</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/LLaDA2.0-Uni">inclusionAI/LLaDA2.0-Uni</a></p></td>
 <td><p>Multimodal</p></td>
 <td><p>Text + image understanding and generation</p></td>
 </tr>
@@ -684,6 +689,7 @@
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_tts.html">MOSS-TTS</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/nemotron3_5_asr.html">Nemotron 3.5 ASR</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cookbook/nemotron_transcribe.html">Nemotron Transcribe</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/fishaudio_s2_pro.html">Fish Audio S2-Pro</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
