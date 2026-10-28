@@ -619,14 +619,14 @@ capacity is acceptable.</p>
 admit a larger prefill batch. The tuned defaults are 16 requests / 32 ms:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--model-path<span class="w"> </span>AutoArk-AI/ARK-ASR-3B<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--prefill-coalesce-requests<span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--prefill-coalesce-wait-ms<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--asr.factory.prefill_coalesce_requests<span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--asr.factory.prefill_coalesce_wait_ms<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
 <p>Admission is released after either the request threshold or wait deadline is
 reached; it can release earlier when pending request-build work drains. Set
-<code class="docutils literal notranslate"><span class="pre">--prefill-coalesce-requests</span> <span class="pre">0</span></code> to disable coalescing. Tune these values for the
+<code class="docutils literal notranslate"><span class="pre">--asr.factory.prefill_coalesce_requests</span> <span class="pre">0</span></code> to disable coalescing. Tune these values for the
 target request distribution and latency requirements.</p>
 </section>
 </section>
