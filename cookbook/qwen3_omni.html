@@ -957,7 +957,7 @@ sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\<
 <ul class="simple">
 <li><p><strong>Context.</strong> The thinker serves within the draft’s context (8,192 tokens for both drafts), and a request whose prompt plus <code class="docutils literal notranslate"><span class="pre">max_tokens</span></code> exceeds it, less a few tokens each step reserves, is rejected with an error. Setting <code class="docutils literal notranslate"><span class="pre">--preprocessing.factory.max_seq_len</span> <span class="pre">8192</span></code> rejects most of them before the thinker.</p></li>
 <li><p><strong>Sampling.</strong> Requests with <code class="docutils literal notranslate"><span class="pre">repetition_penalty</span></code>, <code class="docutils literal notranslate"><span class="pre">frequency_penalty</span></code>, <code class="docutils literal notranslate"><span class="pre">presence_penalty</span></code>, <code class="docutils literal notranslate"><span class="pre">min_p</span></code> or logprobs are rejected, because the draft workers apply penalties once per verify block, drop <code class="docutils literal notranslate"><span class="pre">min_p</span></code>, and skip the sampler that records logprobs. Rollout <code class="docutils literal notranslate"><span class="pre">/generate</span></code> requests default to <code class="docutils literal notranslate"><span class="pre">return_logprob:</span> <span class="pre">true</span></code>, so they must send <code class="docutils literal notranslate"><span class="pre">false</span></code>.</p></li>
-<li><p><strong>Scheduling.</strong> Async decode is turned off, and setting <code class="docutils literal notranslate"><span class="pre">enable_mixed_chunk</span></code> is rejected. EAGLE3 also runs prefill without CUDA graphs, since its draft extends on the composed multimodal embeddings. Sessions and weight updates are refused while a draft is loaded.</p></li>
+<li><p><strong>Scheduling.</strong> Async decode is turned off, and setting <code class="docutils literal notranslate"><span class="pre">enable_mixed_chunk</span></code> is rejected. Sessions and weight updates are refused while a draft is loaded.</p></li>
 <li><p><strong>Speech output.</strong> A draft is refused on a speech server for now. The thinker captures the layer the talker reads through the same hidden-state capture the drafts use, and the speculative prefill does not store the talker’s prompt rows, so serve with <code class="docutils literal notranslate"><span class="pre">--text-only</span></code>.</p></li>
 </ul>
 <p>Text-only ASR on LibriSpeech test-clean (<code class="docutils literal notranslate"><span class="pre">--text-only</span></code>, thinker on one H200 141GB with FA3 and SGLang 0.5.22, greedy, <code class="docutils literal notranslate"><span class="pre">max_tokens</span> <span class="pre">200</span></code>), in requests per second; concurrency 1 over all 2,620 utterances, concurrency 4 and 8 over the two halves, each on a server that has not seen them:</p>
@@ -971,24 +971,24 @@ sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\<
 </thead>
 <tbody>
 <tr class="row-even"><td><p>1</p></td>
-<td><p>7.56</p></td>
-<td><p>12.56 (1.66x)</p></td>
-<td><p>7.69 (1.02x)</p></td>
+<td><p>7.78</p></td>
+<td><p>12.95 (1.66x)</p></td>
+<td><p>11.57 (1.49x)</p></td>
 </tr>
 <tr class="row-odd"><td><p>4</p></td>
-<td><p>16.45</p></td>
-<td><p>24.41 (1.48x)</p></td>
-<td><p>12.06 (0.73x)</p></td>
+<td><p>16.54</p></td>
+<td><p>24.23 (1.46x)</p></td>
+<td><p>21.43 (1.30x)</p></td>
 </tr>
 <tr class="row-even"><td><p>8</p></td>
-<td><p>24.00</p></td>
-<td><p>36.17 (1.51x)</p></td>
-<td><p>18.05 (0.75x)</p></td>
+<td><p>23.94</p></td>
+<td><p>37.19 (1.55x)</p></td>
+<td><p>31.80 (1.33x)</p></td>
 </tr>
 </tbody>
 </table>
 </div>
-<p>DFlash accepts 4.7 tokens per verify and EAGLE3 3.4, with WER unchanged. EAGLE3 trails at concurrency 4 and 8 because its draft runs prefill without CUDA graphs. Requests that repeat earlier audio hit the prefix cache, which speeds the baseline up and slows DFlash down, so benchmark each pass on utterances its server has not seen.</p>
+<p>DFlash accepts 4.7 tokens per verify and EAGLE3 3.4, with WER unchanged. Requests that repeat earlier audio hit the prefix cache, which speeds the baseline up and slows DFlash down, so benchmark each pass on utterances its server has not seen.</p>
 </section>
 </section>
 
