@@ -13,8 +13,11 @@ from tests.test_model.fdb_ci_config import select_fdb_ci_preset
 from tests.utils import MetricCheckCollector
 from tests.utils.fdb_ci import (
     METRIC_SPECS,
+    V15_PER_SUBSET,
     check_no_regression,
+    check_overlaps_exercised,
     collect_fdb_metrics,
+    count_exercised_overlaps,
     run_fdb_ci,
 )
 
@@ -23,7 +26,8 @@ STRATEGY_NAME, PRESET = select_fdb_ci_preset()
 
 @pytest.mark.benchmark
 def test_full_duplex_bench() -> None:
-    """Record, score and judge the strategy's selection; no metric may regress."""
+    """Record, score and judge the strategy's selection; the overlaps must be
+    exercised and no metric may regress."""
     strategy = PRESET.strategy
     run_root = run_fdb_ci(strategy)
     metrics = collect_fdb_metrics(
@@ -39,7 +43,11 @@ def test_full_duplex_bench() -> None:
             f"  {name:36} {measurement.value:.4f}{rate}"
             f"  reference {PRESET.references[name]:.4f}{gating}"
         )
+    exercised = count_exercised_overlaps(run_root, strategy.engine_name)
+    for category, count in exercised.items():
+        print(f"  {category + ' overlaps exercised':36} {count}/{V15_PER_SUBSET}")
     checks = MetricCheckCollector(f"FDB {STRATEGY_NAME}")
+    check_overlaps_exercised(checks, exercised)
     if PRESET.calibrated:
         check_no_regression(checks, metrics, PRESET.references)
     else:

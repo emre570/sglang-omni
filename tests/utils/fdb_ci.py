@@ -50,6 +50,14 @@ POOLED_RATE_TOLERANCE = 5
 # note (jeffro): the pool can hide one rate losing every case, and random flips
 # rarely empty a rate whose reference met at least this many cases.
 RATE_FLOOR_REFERENCE_CASES = 3
+# note (jeffro): a reference is the mean count over repeated runs divided by n,
+# kept to four decimals, so cases on target stay fractional and are rounded only
+# to drop float error.
+REFERENCE_CASE_DECIMALS = 4
+# note (jeffro): a pair whose model was silent when its event began never tested
+# the overlap; such a run still scores well, since nothing was there to go wrong.
+MIN_EXERCISED_PAIRS_PER_CATEGORY = 3
+MIN_EXERCISED_PAIRS = 15
 LATENCY_TOLERANCE = 1.25
 OMISSION_RATE_TOLERANCE = 0.02
 VOICE_SIMILARITY_TOLERANCE = 3.0
@@ -217,22 +225,74 @@ def run_fdb_ci(strategy: FdbCiStrategy) -> Path:
 
 
 def variant_outcomes(recording: Path) -> Counter[str]:
-    """Counts of pass, client_pacing (failed only by late client sends) and
+    """Counts of pass, not_exercised (kept the protocol, but no output overlapped
+    the input), client_pacing (failed only by late client sends) and
     protocol_failure over every recorded session."""
     outcomes: Counter[str] = Counter()
     for run in recording.glob("shard-*/run.json"):
         for sample in read_json(run)["samples"]:
             for variant in sample["variants"].values():
-                if variant["status"] == "pass":
-                    outcomes["pass"] += 1
-                elif variant["protocol_verdict"] == "pass" and all(
-                    error.startswith("input pacing deviation")
-                    for error in variant["errors"]
+                if variant["status"] in ("pass", "not_exercised"):
+                    outcomes[variant["status"]] += 1
+                elif (
+                    variant["protocol_verdict"] == "pass"
+                    and variant["errors"]
+                    and all(
+                        error.startswith("input pacing deviation")
+                        for error in variant["errors"]
+                    )
                 ):
                     outcomes["client_pacing"] += 1
                 else:
                     outcomes["protocol_failure"] += 1
     return outcomes
+
+
+def is_speaking_at(segments: JsonValue, time_s: float) -> bool:
+    return any(start_s <= time_s < end_s for start_s, end_s in segments)
+
+
+def count_exercised_overlaps(run_root: Path, engine_name: EngineName) -> Counter[str]:
+    """Per v1.5 category, the overlap pairs whose model was already speaking when
+    the event began, the moment the category tests."""
+    repeat = run_root / "repeat-1"
+    event_starts_s: dict[str, float] = {}
+    for run in (repeat / "recording").glob("shard-*/run.json"):
+        for sample in read_json(run)["samples"]:
+            span = sample["event_span_s"]
+            assert span is not None, f"{sample['id']}: no event timestamps"
+            event_starts_s[sample["id"]] = finite_measurement(sample["id"], span[0])
+    assert len(event_starts_s) == V15_PER_SUBSET * len(V15_CATEGORIES), sorted(
+        event_starts_s
+    )
+    samples = repeat / "scores" / "engines" / engine_name / "samples"
+    exercised: Counter[str] = Counter({category: 0 for category in V15_CATEGORIES})
+    for sample_id, event_start_s in event_starts_s.items():
+        receipt = read_json(samples / sample_id / "receipts" / "timing-overlap.json")
+        if is_speaking_at(receipt["model_segments"], event_start_s):
+            exercised[sample_id.split("/")[0]] += 1
+        else:
+            pass
+    return exercised
+
+
+def check_overlaps_exercised(
+    checks: MetricCheckCollector, exercised: Counter[str]
+) -> None:
+    """Record a run whose model was too often silent when the events began to
+    have tested the overlaps at all."""
+    for category in V15_CATEGORIES:
+        checks.check(
+            exercised[category] >= MIN_EXERCISED_PAIRS_PER_CATEGORY,
+            f"{category}: overlap exercised in {exercised[category]}/"
+            f"{V15_PER_SUBSET} pairs < {MIN_EXERCISED_PAIRS_PER_CATEGORY}",
+        )
+    total = sum(exercised.values())
+    pairs = V15_PER_SUBSET * len(V15_CATEGORIES)
+    checks.check(
+        total >= MIN_EXERCISED_PAIRS,
+        f"overlap exercised in {total}/{pairs} pairs < {MIN_EXERCISED_PAIRS}",
+    )
 
 
 def finite_measurement(name: str, value: JsonValue) -> float:
@@ -353,13 +413,21 @@ def regression_bound(name: str, reference: float) -> float:
         return reference - VOICE_SIMILARITY_TOLERANCE
 
 
-def cases_on_target(spec: MetricSpec, count: int, n: int) -> int:
+def cases_on_target(spec: MetricSpec, count: float, n: int) -> float:
     """Cases of a rate that went the way the metric wants: the counted ones when
     higher is better, the rest when lower is better."""
     if spec.is_higher_better:
-        return count
+        return round(count, REFERENCE_CASE_DECIMALS)
     else:
-        return n - count
+        return round(n - count, REFERENCE_CASE_DECIMALS)
+
+
+def rate_cases(name: str) -> int:
+    """The cases every run scores for a gated rate."""
+    if name in BEHAVIOR_METRICS:
+        return V15_PER_SUBSET
+    else:
+        return V10_PER_SUBSET
 
 
 def check_no_regression(
@@ -369,7 +437,8 @@ def check_no_regression(
 ) -> None:
     """Record every gated metric that is unmeasured or worse than its bound. The
     rates are gated by their cases on target together, and each by a floor."""
-    pooled_reference_cases = pooled_observed_cases = pooled_n = 0
+    pooled_reference_cases = 0.0
+    pooled_observed_cases = pooled_n = 0
     for name, reference in references.items():
         spec = METRIC_SPECS[name]
         if not spec.is_gated:
@@ -379,19 +448,23 @@ def check_no_regression(
         elif spec.kind == "rate":
             measurement = metrics[name]
             assert measurement.count is not None and measurement.n is not None
-            # note (jeffro): references keep four decimals, so rounding recovers
-            # the count a reference stands for at this n.
-            reference_count = round(reference * measurement.n)
-            reference_cases = cases_on_target(spec, reference_count, measurement.n)
-            observed_cases = cases_on_target(spec, measurement.count, measurement.n)
+            n = rate_cases(name)
+            # note (jeffro): a case the judge could not score would shrink n and
+            # shift the pool, so the rate fails instead.
+            checks.check(
+                measurement.n == n,
+                f"{name}: scored {measurement.n} of {n} cases",
+            )
+            reference_cases = cases_on_target(spec, reference * n, n)
+            observed_cases = int(cases_on_target(spec, measurement.count, n))
             checks.check(
                 reference_cases < RATE_FLOOR_REFERENCE_CASES or observed_cases > 0,
-                f"{name}: {measurement.count}/{measurement.n} collapsed from "
-                f"{reference_count}/{measurement.n}",
+                f"{name}: {measurement.count}/{n} collapsed from "
+                f"{reference * n:g}/{n}",
             )
             pooled_reference_cases += reference_cases
             pooled_observed_cases += observed_cases
-            pooled_n += measurement.n
+            pooled_n += n
         else:
             value = metrics[name].value
             bound = regression_bound(name, reference)
@@ -399,9 +472,12 @@ def check_no_regression(
                 checks.check(value >= bound, f"{name}: {value:.4g} < {bound:.4g}")
             else:
                 checks.check(value <= bound, f"{name}: {value:.4g} > {bound:.4g}")
-    pooled_bound = max(0, pooled_reference_cases - POOLED_RATE_TOLERANCE)
+    pooled_bound = max(
+        0.0,
+        round(pooled_reference_cases - POOLED_RATE_TOLERANCE, REFERENCE_CASE_DECIMALS),
+    )
     checks.check(
         pooled_observed_cases >= pooled_bound,
         f"pooled rates: {pooled_observed_cases}/{pooled_n} cases on target "
-        f"< {pooled_bound}/{pooled_n}",
+        f"< {pooled_bound:g}/{pooled_n}",
     )

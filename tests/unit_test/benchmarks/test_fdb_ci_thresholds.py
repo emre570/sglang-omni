@@ -20,6 +20,9 @@ CI_TEST = "tests/test_model/test_fdb_ci.py"
 ENGINE = "cascade"
 STOP_INTERVAL_S = 1.0
 RESPONSE_INTERVAL_S = 2.0
+EVENT_SPAN_S = [1.0, 2.0]
+SPEAKING_THROUGH_EVENT = [[0.5, 4.0]]
+SPEAKING_AFTER_EVENT = [[2.5, 4.0]]
 
 
 @pytest.mark.parametrize(
@@ -73,7 +76,10 @@ def read_json(path: Path) -> JsonValue:
 
 
 def write_timing(
-    sample: Path, stop: list[list[float]], response: list[list[float]]
+    sample: Path,
+    stop: list[list[float]],
+    response: list[list[float]],
+    model_segments: list[list[float]] = SPEAKING_THROUGH_EVENT,
 ) -> None:
     intervals = sample / "latency_intervals.json"
     write_json(intervals, {"latency_stop_list": stop, "latency_resp_list": response})
@@ -82,8 +88,17 @@ def write_timing(
         {
             "status": "ok",
             "intervals_sha256": hashlib.sha256(intervals.read_bytes()).hexdigest(),
+            "model_segments": model_segments,
         },
     )
+
+
+def v15_sample_ids() -> list[str]:
+    return [
+        f"{category}/{index}"
+        for category in fdb_ci.V15_CATEGORIES
+        for index in range(1, fdb_ci.V15_PER_SUBSET + 1)
+    ]
 
 
 def passing_variant() -> dict[str, JsonValue]:
@@ -94,14 +109,20 @@ def passing_variant() -> dict[str, JsonValue]:
 def run_root(tmp_path: Path) -> Path:
     """A complete scored run whose every metric equals REFERENCES."""
     repeat = tmp_path / "repeat-1"
-    pairs = fdb_ci.V15_PER_SUBSET * len(fdb_ci.V15_CATEGORIES)
     v10_samples = fdb_ci.V10_PER_SUBSET * len(fdb_ci.V10_SUBSETS)
     write_json(
         repeat / "recording" / "shard-0" / "run.json",
         {
             "samples": [
-                {"variants": {"overlap": passing_variant(), "clean": passing_variant()}}
-                for _ in range(pairs)
+                {
+                    "id": sample_id,
+                    "event_span_s": EVENT_SPAN_S,
+                    "variants": {
+                        "overlap": passing_variant(),
+                        "clean": passing_variant(),
+                    },
+                }
+                for sample_id in v15_sample_ids()
             ]
         },
     )
@@ -136,9 +157,9 @@ def run_root(tmp_path: Path) -> Path:
         },
     )
     samples = repeat / "scores" / "engines" / ENGINE / "samples"
-    for index in range(pairs):
+    for sample_id in v15_sample_ids():
         write_timing(
-            samples / "category" / str(index),
+            samples / sample_id,
             [[0.0, STOP_INTERVAL_S]],
             [[0.0, RESPONSE_INTERVAL_S]],
         )
@@ -193,10 +214,17 @@ REFERENCES = {
 }
 
 
-def gate(run_root: Path, should_run_semantic_judge: bool = True) -> None:
+def gate(
+    run_root: Path,
+    should_run_semantic_judge: bool = True,
+    references: dict[str, float] = REFERENCES,
+) -> None:
     metrics = fdb_ci.collect_fdb_metrics(run_root, ENGINE, should_run_semantic_judge)
     checks = MetricCheckCollector("FDB fixture")
-    fdb_ci.check_no_regression(checks, metrics, REFERENCES)
+    fdb_ci.check_overlaps_exercised(
+        checks, fdb_ci.count_exercised_overlaps(run_root, ENGINE)
+    )
+    fdb_ci.check_no_regression(checks, metrics, references)
     checks.assert_all()
 
 
@@ -234,6 +262,90 @@ def test_the_rates_share_one_slack_and_a_lower_is_better_rate_counts_inverted(
     with pytest.raises(
         AssertionError, match="pooled rates: 12/35 cases on target < 13/35"
     ):
+        gate(run_root)
+
+
+def test_a_reference_between_counts_keeps_its_fraction(run_root: Path) -> None:
+    """A pause intrusion reference of 0.1 stands for 4.5 cases on target, not the
+    5 that rounding half to even gives, so the pool expects 19 cases, not 20."""
+    references = {
+        **REFERENCES,
+        "v10_synthetic_pause_intrusion_rate": 0.1,
+        "v10_candor_pause_intrusion_rate": 0.1,
+    }
+    set_behavior_count(run_root, "user_interruption", "C_RESPOND", 1)
+    set_behavior_count(run_root, "user_backchannel", "C_RESUME", 0)
+    gate(run_root, references=references)
+    set_v10_count(run_root, "candor_turn_taking", "response_rate_2s", 0)
+    with pytest.raises(
+        AssertionError, match="pooled rates: 13/35 cases on target < 14/35"
+    ):
+        gate(run_root, references=references)
+
+
+def test_a_rate_with_an_unscored_case_fails(run_root: Path) -> None:
+    """A pair the judge could not label shrinks n and would shift the pool."""
+    path = run_root / "repeat-1" / "judge-qwen" / "summary.json"
+    document = read_json(path)
+    document["engines"][ENGINE]["user_backchannel"]["valid_n"] = 4
+    write_json(path, document)
+    with pytest.raises(
+        AssertionError, match="v15_resume_on_backchannel: scored 4 of 5 cases"
+    ):
+        gate(run_root)
+
+
+def set_model_segments(
+    run_root: Path, sample_ids: list[str], model_segments: list[list[float]]
+) -> None:
+    samples = run_root / "repeat-1" / "scores" / "engines" / ENGINE / "samples"
+    for sample_id in sample_ids:
+        write_timing(
+            samples / sample_id,
+            [[0.0, STOP_INTERVAL_S]],
+            [[0.0, RESPONSE_INTERVAL_S]],
+            model_segments,
+        )
+
+
+def test_a_model_silent_when_the_event_began_did_not_exercise_the_overlap(
+    run_root: Path,
+) -> None:
+    """Three pairs of a category may start speaking after their event, not a
+    fourth; speech starting at the event's onset counts, speech ending there not."""
+    set_model_segments(
+        run_root,
+        ["user_interruption/1", "user_interruption/2"],
+        SPEAKING_AFTER_EVENT,
+    )
+    set_model_segments(run_root, ["user_interruption/3"], [[EVENT_SPAN_S[0], 4.0]])
+    gate(run_root)
+    set_model_segments(run_root, ["user_interruption/3"], [[0.0, EVENT_SPAN_S[0]]])
+    with pytest.raises(
+        AssertionError, match="user_interruption: overlap exercised in 2/5 pairs < 3"
+    ):
+        gate(run_root)
+
+
+def test_too_few_exercised_overlaps_fail_though_every_category_has_three(
+    run_root: Path,
+) -> None:
+    late = [
+        f"{category}/{index}" for category in fdb_ci.V15_CATEGORIES for index in (1, 2)
+    ]
+    set_model_segments(run_root, late[:5], SPEAKING_AFTER_EVENT)
+    gate(run_root)
+    set_model_segments(run_root, late[5:], SPEAKING_AFTER_EVENT)
+    with pytest.raises(AssertionError, match="overlap exercised in 12/20 pairs < 15"):
+        gate(run_root)
+
+
+def test_a_sample_without_event_timestamps_fails(run_root: Path) -> None:
+    path = run_root / "repeat-1" / "recording" / "shard-0" / "run.json"
+    document = read_json(path)
+    document["samples"][0]["event_span_s"] = None
+    write_json(path, document)
+    with pytest.raises(AssertionError, match="no event timestamps"):
         gate(run_root)
 
 
@@ -372,6 +484,29 @@ def test_one_client_pacing_failure_passes_and_a_protocol_failure_does_not(
         gate(run_root)
 
 
+def test_a_not_exercised_session_is_counted_apart_from_client_pacing(
+    run_root: Path,
+) -> None:
+    """A not_exercised session kept the protocol, and a failure that names no
+    pacing error is a protocol failure."""
+    path = run_root / "repeat-1" / "recording" / "shard-0" / "run.json"
+    document = read_json(path)
+    variants = document["samples"][0]["variants"]
+    variants["overlap"] = {
+        "status": "not_exercised",
+        "protocol_verdict": "pass",
+        "errors": [],
+    }
+    write_json(path, document)
+    outcomes = fdb_ci.variant_outcomes(run_root / "repeat-1" / "recording")
+    assert (outcomes["not_exercised"], outcomes["client_pacing"]) == (1, 0)
+    gate(run_root)
+    variants["clean"] = {"status": "fail", "protocol_verdict": "pass", "errors": []}
+    write_json(path, document)
+    with pytest.raises(AssertionError, match="protocol failures"):
+        gate(run_root)
+
+
 def test_a_rate_without_scored_samples_fails(run_root: Path) -> None:
     path = run_root / "repeat-1" / "v10" / "reference" / "unified.json"
     document = read_json(path)
@@ -389,6 +524,16 @@ def test_a_rate_without_scored_samples_fails(run_root: Path) -> None:
 def test_every_strategy_references_every_metric(strategy_name: str) -> None:
     preset = fdb_ci_config.FDB_CI_PRESETS[strategy_name]
     assert set(preset.references) == set(fdb_ci.METRIC_SPECS)
+
+
+@pytest.mark.parametrize("strategy_name", list(fdb_ci_config.FDB_CI_PRESETS))
+def test_every_rate_reference_is_a_share_of_its_cases(strategy_name: str) -> None:
+    references = fdb_ci_config.FDB_CI_PRESETS[strategy_name].references
+    for name, spec in fdb_ci.METRIC_SPECS.items():
+        if spec.kind == "rate":
+            assert 0 <= references[name] <= 1, name
+        else:
+            pass
 
 
 def test_every_duplex_ci_job_selects_a_known_strategy() -> None:
