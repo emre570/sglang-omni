@@ -26,7 +26,11 @@ from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
 from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import FINISH_MATCHED_TOKEN
-from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool, HybridReqToTokenPool
+from sglang.srt.mem_cache.memory_pool import (
+    HybridLinearKVPool,
+    HybridReqToTokenPool,
+    MambaPool,
+)
 from sglang.srt.model_executor import model_runner as sglang_model_runner
 from sglang.srt.model_executor.cuda_graph_config import Backend as CudaGraphBackend
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -78,7 +82,10 @@ from sglang_omni.models.fishaudio_drama3.sglang_model import (
     StepExchange,
     next_frame_labels,
 )
-from sglang_omni.models.fishaudio_drama3.speculative import PairProposalBlock
+from sglang_omni.models.fishaudio_drama3.speculative import (
+    Drama3StateSnapshot,
+    PairProposalBlock,
+)
 from sglang_omni.models.fishaudio_drama3.tower_kernels import (
     FUSED_KERNELS,
     MAX_FUSED_ROWS,
@@ -2304,6 +2311,67 @@ def test_proposal_backbone_keeps_all_logit_rows() -> None:
     assert logits_batch.next_token_logits_buffer is None
     assert forward_batch.forward_mode == ForwardMode.EXTEND
     model.model.assert_not_called()
+
+
+def test_state_snapshot_restores_kv_and_recurrent_pool_state() -> None:
+    token_to_kv_pool = HybridLinearKVPool.__new__(HybridLinearKVPool)
+    request_pool = HybridReqToTokenPool.__new__(HybridReqToTokenPool)
+    mamba_pool = MambaPool.__new__(MambaPool)
+    mamba_pool.mamba_cache = MambaPool.State(
+        conv=[torch.ones(1)], temporal=torch.ones(1)
+    )
+    token_to_kv_pool.mamba_pool = request_pool.mamba_pool = mamba_pool
+    request_pool.req_index_to_mamba_index_mapping = torch.arange(16)
+    cache_copy = (
+        [[[torch.tensor([[1]]), torch.tensor([[2]])]]],
+        ([torch.tensor([[3]])], torch.tensor([[4]])),
+    )
+    token_to_kv_pool.get_cpu_copy = Mock(return_value=cache_copy)
+    token_to_kv_pool.load_cpu_copy = Mock()
+    cache_slots = torch.tensor([5, 6])
+    request_indices = torch.tensor([7])
+
+    snapshot = Drama3StateSnapshot.capture(
+        token_to_kv_pool,
+        request_pool,
+        cache_slots,
+        request_indices,
+    )
+    cache_slots.fill_(99)
+    request_indices.fill_(98)
+    snapshot.restore()
+
+    assert snapshot.cache_slots.tolist() == [5, 6]
+    assert snapshot.request_indices.tolist() == [7]
+    saved_slots, saved_mamba_slots = token_to_kv_pool.get_cpu_copy.call_args.args
+    assert saved_mamba_slots.tolist() == [7]
+    loaded_copy, loaded_slots, loaded_mamba_slots = (
+        token_to_kv_pool.load_cpu_copy.call_args.args
+    )
+    assert loaded_copy is cache_copy
+    assert loaded_slots.tolist() == [5, 6]
+    assert loaded_mamba_slots.tolist() == [7]
+    request_pool.req_index_to_mamba_index_mapping[7] = 12
+    with pytest.raises(RuntimeError, match="mapping changed"):
+        snapshot.restore()
+    assert token_to_kv_pool.load_cpu_copy.call_count == 1
+
+
+def test_state_snapshot_rejects_extra_recurrent_state() -> None:
+    token_to_kv_pool = HybridLinearKVPool.__new__(HybridLinearKVPool)
+    request_pool = HybridReqToTokenPool.__new__(HybridReqToTokenPool)
+    mamba_pool = MambaPool.__new__(MambaPool)
+    mamba_pool.mamba_cache = MambaPool.SpeculativeState(
+        conv=[torch.ones(1)],
+        temporal=torch.ones(1),
+        intermediate_ssm=torch.ones(1),
+        intermediate_conv_window=[torch.ones(1)],
+    )
+    token_to_kv_pool.mamba_pool = request_pool.mamba_pool = mamba_pool
+    with pytest.raises(ValueError, match="speculative or ReplaySSM"):
+        Drama3StateSnapshot.capture(
+            token_to_kv_pool, request_pool, torch.tensor([1]), torch.tensor([1])
+        )
 
 
 def test_model_rejects_a_tower_that_cannot_share_the_backbone_pool() -> None:

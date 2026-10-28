@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import torch
+from sglang.srt.mem_cache.memory_pool import (
+    HybridLinearKVPool,
+    HybridReqToTokenPool,
+    MambaPool,
+)
 
 from sglang_omni.models.fishaudio_drama3.audio_decoder import AudioDecoder
 from sglang_omni.models.fishaudio_drama3.decoder_layers import DecoderAttention
 from sglang_omni.models.fishaudio_drama3.sampling import RAS_WINDOW_FRAMES
+
+KVCacheCopy = list[list[list[torch.Tensor]]]
+MambaCacheCopy = tuple[list[torch.Tensor], torch.Tensor]
+HybridCacheCopy = tuple[KVCacheCopy, MambaCacheCopy | None]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -80,6 +89,71 @@ class PairProposalBlock:
             ),
             eos_token_id=eos_token_id,
         )
+
+
+@dataclass(frozen=True, kw_only=True)
+class Drama3StateSnapshot:
+    """Slow offline snapshot of owned KV slots and one plain conv/SSM request state."""
+
+    token_to_kv_pool: HybridLinearKVPool
+    request_pool: HybridReqToTokenPool
+    cache_slots: torch.Tensor
+    request_indices: torch.Tensor
+    mamba_slots: torch.Tensor
+    cache_copy: HybridCacheCopy
+
+    @classmethod
+    def capture(
+        cls,
+        token_to_kv_pool: HybridLinearKVPool,
+        request_pool: HybridReqToTokenPool,
+        cache_slots: torch.Tensor,
+        request_indices: torch.Tensor,
+    ) -> Drama3StateSnapshot:
+        """Caller keeps all slots allocated until the snapshot is retired."""
+        if (
+            type(token_to_kv_pool) is not HybridLinearKVPool
+            or type(request_pool) is not HybridReqToTokenPool
+        ):
+            raise ValueError("offline snapshots require static hybrid pools")
+        else:
+            pass
+        state = request_pool.mamba_pool.mamba_cache
+        if type(state) is not MambaPool.State or any(
+            getattr(state, field.name) is not None
+            for field in fields(state)
+            if field.name not in {"conv", "temporal"}
+        ):
+            raise ValueError(
+                "offline snapshots do not support speculative or ReplaySSM state"
+            )
+        else:
+            pass
+        assert token_to_kv_pool.mamba_pool is request_pool.mamba_pool
+        assert cache_slots.ndim == request_indices.ndim == 1
+        assert request_indices.numel() == 1 and cache_slots.numel() > 0
+        mamba_slots = request_pool.get_mamba_indices(request_indices)
+        return cls(
+            token_to_kv_pool=token_to_kv_pool,
+            request_pool=request_pool,
+            cache_slots=cache_slots.clone(),
+            request_indices=request_indices.clone(),
+            mamba_slots=mamba_slots.clone(),
+            cache_copy=token_to_kv_pool.get_cpu_copy(cache_slots, mamba_slots),
+        )
+
+    def restore(self) -> None:
+        """Restore tensors, not allocator ownership, request lengths or RNG."""
+        if not torch.equal(
+            self.request_pool.get_mamba_indices(self.request_indices), self.mamba_slots
+        ):
+            raise RuntimeError(
+                "request-to-Mamba mapping changed since snapshot capture"
+            )
+        else:
+            self.token_to_kv_pool.load_cpu_copy(
+                self.cache_copy, self.cache_slots, self.mamba_slots
+            )
 
 
 @dataclass(frozen=True, kw_only=True)
