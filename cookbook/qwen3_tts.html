@@ -532,6 +532,7 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#synthesizing-speech">Synthesizing Speech</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#text-only-requests">Text-only Requests</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#voice-cloning">Voice Cloning</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#precomputed-speaker-embedding">Precomputed Speaker Embedding</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#language-hint">Language Hint</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#streaming">Streaming</a></li>
 </ul>
@@ -988,6 +989,48 @@ from the unmasked model. To turn it off:</p>
 </pre></div>
 </div>
 </section>
+<section id="precomputed-speaker-embedding">
+<h3>Precomputed Speaker Embedding<a class="headerlink" href="#precomputed-speaker-embedding" title="Link to this heading">#</a></h3>
+<p>A Base reference can be given as its speaker embedding, <code class="docutils literal notranslate"><span class="pre">references[0].speaker_embedding</span></code>, instead of its clip. The server then loads and encodes no audio, and every replica serves every voice without stored voice state.</p>
+<p>The embedding is the x-vector the checkpoint’s speaker encoder computes from a reference clip: 1024 values for 0.6B Base and 2048 for 1.7B Base. An embedding from one checkpoint size does not fit the other. Sending the embedding the server computes for a clip produces the same audio as sending that clip with <code class="docutils literal notranslate"><span class="pre">x_vector_only_mode:</span> <span class="pre">true</span></code>, including the x-vector leading-silence mask above.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">qwen-tts</span></code> package computes it. Install it in its own Python environment (<code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">qwen-tts</span></code>), since it pins an older transformers release than the server. On SeedTTS EN references its embeddings match the server’s to bfloat16 rounding (cosine above 0.99999 on 100 references for each size).</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">qwen_tts</span><span class="w"> </span><span class="kn">import</span> <span class="n">Qwen3TTSModel</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">Qwen3TTSModel</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="s2">"Qwen/Qwen3-TTS-12Hz-0.6B-Base"</span><span class="p">,</span> <span class="n">device_map</span><span class="o">=</span><span class="s2">"cuda:0"</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span>
+<span class="p">)</span>
+<span class="p">(</span><span class="n">prompt</span><span class="p">,)</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">create_voice_clone_prompt</span><span class="p">(</span>
+    <span class="n">ref_audio</span><span class="o">=</span><span class="s2">"reference.wav"</span><span class="p">,</span> <span class="n">x_vector_only_mode</span><span class="o">=</span><span class="kc">True</span>
+<span class="p">)</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"speaker_embedding.json"</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">prompt</span><span class="o">.</span><span class="n">ref_spk_embedding</span><span class="o">.</span><span class="n">float</span><span class="p">()</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span> <span class="n">f</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Then send the stored embedding with the text:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"speaker_embedding.json"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">speaker_embedding</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+    <span class="s2">"http://localhost:8000/v1/audio/speech"</span><span class="p">,</span>
+    <span class="n">json</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"Qwen/Qwen3-TTS-12Hz-0.6B-Base"</span><span class="p">,</span>
+        <span class="s2">"input"</span><span class="p">:</span> <span class="s2">"Get the trust fund to the bank early."</span><span class="p">,</span>
+        <span class="s2">"references"</span><span class="p">:</span> <span class="p">[{</span><span class="s2">"speaker_embedding"</span><span class="p">:</span> <span class="n">speaker_embedding</span><span class="p">}],</span>
+    <span class="p">},</span>
+<span class="p">)</span>
+<span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"output.wav"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">content</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The request runs in x-vector mode. A transcript is not used, and <code class="docutils literal notranslate"><span class="pre">x_vector_only_mode</span></code> may be omitted or set to <code class="docutils literal notranslate"><span class="pre">true</span></code>. The embedding reference must be the only reference, with no audio, no <code class="docutils literal notranslate"><span class="pre">vq_codes</span></code> and no <code class="docutils literal notranslate"><span class="pre">ref_audio</span></code>, and every value must be finite in the model’s dtype. CustomVoice and VoiceDesign checkpoints reject it.</p>
+</section>
 <section id="language-hint">
 <h3>Language Hint<a class="headerlink" href="#language-hint" title="Link to this heading">#</a></h3>
 <p><code class="docutils literal notranslate"><span class="pre">language</span></code> biases the model toward a target language. It defaults to <code class="docutils literal notranslate"><span class="pre">auto</span></code> (let the model
@@ -1142,7 +1185,7 @@ only the first chunk.</p>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">references</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">null</span></code></p></td>
-<td><p>Reference clip for cloning. Each item has <code class="docutils literal notranslate"><span class="pre">audio_path</span></code> and <code class="docutils literal notranslate"><span class="pre">text</span></code></p></td>
+<td><p>Reference clip for cloning. Each item has <code class="docutils literal notranslate"><span class="pre">audio_path</span></code> and <code class="docutils literal notranslate"><span class="pre">text</span></code>, or only <code class="docutils literal notranslate"><span class="pre">speaker_embedding</span></code>: the checkpoint’s speaker-encoder x-vector of the clip, 1024 values for 0.6B Base and 2048 for 1.7B Base. See <a class="reference internal" href="#precomputed-speaker-embedding"><span class="std std-ref">Precomputed Speaker Embedding</span></a></p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ref_audio</span></code> / <code class="docutils literal notranslate"><span class="pre">ref_text</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">null</span></code></p></td>
@@ -1492,6 +1535,7 @@ finish reason <code class="docutils literal notranslate"><span class="pre">lengt
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#synthesizing-speech">Synthesizing Speech</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#text-only-requests">Text-only Requests</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#voice-cloning">Voice Cloning</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#precomputed-speaker-embedding">Precomputed Speaker Embedding</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#language-hint">Language Hint</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#streaming">Streaming</a></li>
 </ul>

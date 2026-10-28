@@ -596,7 +596,7 @@ for details.</p>
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="../cookbook/qwen3_tts.html"><span class="std std-doc">Qwen3-TTS Base</span></a></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">examples/configs/qwen3_tts_0_6b.yaml</span></code>, <code class="docutils literal notranslate"><span class="pre">examples/configs/qwen3_tts_1_7b.yaml</span></code></p></td>
-<td><p>Requires reference audio through <code class="docutils literal notranslate"><span class="pre">ref_audio</span></code> or <code class="docutils literal notranslate"><span class="pre">references[0].audio_path</span></code>. <code class="docutils literal notranslate"><span class="pre">language</span></code> defaults to <code class="docutils literal notranslate"><span class="pre">auto</span></code></p></td>
+<td><p>Requires reference audio through <code class="docutils literal notranslate"><span class="pre">ref_audio</span></code> or <code class="docutils literal notranslate"><span class="pre">references[0].audio_path</span></code>, or the reference’s x-vector through <code class="docutils literal notranslate"><span class="pre">references[0].speaker_embedding</span></code>. <code class="docutils literal notranslate"><span class="pre">language</span></code> defaults to <code class="docutils literal notranslate"><span class="pre">auto</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p><a class="reference internal" href="../cookbook/qwen3_tts.html#customvoice-checkpoints"><span class="std std-ref">Qwen3-TTS CustomVoice</span></a></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">examples/configs/qwen3_tts_0_6b_customvoice.yaml</span></code>, <code class="docutils literal notranslate"><span class="pre">examples/configs/qwen3_tts_1_7b_customvoice.yaml</span></code></p></td>
@@ -792,6 +792,19 @@ Qwen3-TTS CustomVoice, Voxtral, and S2-Pro. It is not valid for Qwen3-TTS Base.<
 <span class="w">  </span>--output<span class="w"> </span>output.wav
 </pre></div>
 </div>
+<p>A Qwen3-TTS Base reference can also be given as its speaker embedding instead of its audio, so a deployment that stores each voice’s embedding sends no audio and keeps no voice state on the server. Here <code class="docutils literal notranslate"><span class="pre">speaker_embedding.json</span></code> holds one stored embedding as a JSON list:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/v1/audio/speech<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">"{</span>
+<span class="s2">    \"model\": \"Qwen/Qwen3-TTS-12Hz-0.6B-Base\",</span>
+<span class="s2">    \"voice\": \"default\",</span>
+<span class="s2">    \"input\": \"Get the trust fund to the bank early.\",</span>
+<span class="s2">    \"references\": [{\"speaker_embedding\": </span><span class="k">$(</span>cat<span class="w"> </span>speaker_embedding.json<span class="k">)</span><span class="s2">}]</span>
+<span class="s2">  }"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output<span class="w"> </span>output.wav
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">references[0].speaker_embedding</span></code> is the x-vector the same checkpoint’s speaker encoder computes from a reference clip: 1024 numbers for 0.6B Base, 2048 for 1.7B Base, each finite in the model’s dtype, so an embedding from one size does not fit the other. That reference must be the only one, without audio and without <code class="docutils literal notranslate"><span class="pre">ref_audio</span></code>, and it implies <code class="docutils literal notranslate"><span class="pre">x_vector_only_mode</span></code>, so a transcript is neither required nor used. See <a class="reference internal" href="../cookbook/qwen3_tts.html#precomputed-speaker-embedding"><span class="std std-ref">Precomputed speaker embedding</span></a> for how to compute one.</p>
 <p>Qwen3-TTS CustomVoice uses a built-in speaker without reference audio:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/v1/audio/speech<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
@@ -1236,7 +1249,7 @@ the SGLang-Omni server:</p>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">references</span></code></p></td>
 <td><p>list</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">null</span></code></p></td>
-<td><p>Reference audio for voice cloning. Each item has <code class="docutils literal notranslate"><span class="pre">audio_path</span></code> (local path / file URL / data URL / remote URL) and <code class="docutils literal notranslate"><span class="pre">text</span></code></p></td>
+<td><p>Reference audio for voice cloning. Each item has <code class="docutils literal notranslate"><span class="pre">audio_path</span></code> (local path / file URL / data URL / remote URL) and <code class="docutils literal notranslate"><span class="pre">text</span></code>. For Qwen3-TTS Base, the only item may instead carry <code class="docutils literal notranslate"><span class="pre">speaker_embedding</span></code>: the x-vector the same checkpoint’s speaker encoder computes from the clip, 1024 numbers for 0.6B and 2048 for 1.7B, each finite in the model’s dtype, which implies x-vector-only mode</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">ref_audio</span></code></p></td>
 <td><p>string</p></td>
@@ -1256,7 +1269,7 @@ the SGLang-Omni server:</p>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">task_type</span></code></p></td>
 <td><p>string</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">null</span></code></p></td>
-<td><p>Qwen3-TTS task type: <code class="docutils literal notranslate"><span class="pre">Base</span></code>, <code class="docutils literal notranslate"><span class="pre">CustomVoice</span></code>, or <code class="docutils literal notranslate"><span class="pre">VoiceDesign</span></code>. Inferred as <code class="docutils literal notranslate"><span class="pre">Base</span></code> when reference audio/text is present, otherwise <code class="docutils literal notranslate"><span class="pre">CustomVoice</span></code></p></td>
+<td><p>Qwen3-TTS task type: <code class="docutils literal notranslate"><span class="pre">Base</span></code>, <code class="docutils literal notranslate"><span class="pre">CustomVoice</span></code>, or <code class="docutils literal notranslate"><span class="pre">VoiceDesign</span></code>. Inferred as <code class="docutils literal notranslate"><span class="pre">Base</span></code> when reference audio/text or a reference’s <code class="docutils literal notranslate"><span class="pre">speaker_embedding</span></code> is present, otherwise <code class="docutils literal notranslate"><span class="pre">CustomVoice</span></code></p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">instructions</span></code></p></td>
 <td><p>string</p></td>
