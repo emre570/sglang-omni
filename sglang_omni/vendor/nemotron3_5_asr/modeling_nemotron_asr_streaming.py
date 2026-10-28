@@ -514,8 +514,7 @@ class NemotronAsrStreamingEncoderConvolutionModule(nn.Module):
             `torch.Tensor`: Output tensor of shape `(batch, time, channels)`.
 
         """
-        # The kernel-size-1 pointwise convs run as F.linear on (B, T, C). As nn.Conv1d,
-        # cuDNN transposes the full weight to NHWC on every call, which costs more than the GEMM.
+        # note (Emre): As nn.Conv1d, cuDNN transposes the whole kernel-size-1 weight on every call.
         # GLU mechanism
         hidden_states = nn.functional.linear(
             hidden_states,
