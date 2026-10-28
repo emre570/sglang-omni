@@ -514,11 +514,16 @@ class NemotronAsrStreamingEncoderConvolutionModule(nn.Module):
             `torch.Tensor`: Output tensor of shape `(batch, time, channels)`.
 
         """
-        hidden_states = hidden_states.transpose(1, 2)  # (B, C, T)
-
+        # The kernel-size-1 pointwise convs run as F.linear on (B, T, C). As nn.Conv1d,
+        # cuDNN transposes the full weight to NHWC on every call, which costs more than the GEMM.
         # GLU mechanism
-        hidden_states = self.pointwise_conv1(hidden_states)
-        hidden_states = nn.functional.glu(hidden_states, dim=1)
+        hidden_states = nn.functional.linear(
+            hidden_states,
+            self.pointwise_conv1.weight.squeeze(-1),
+            self.pointwise_conv1.bias,
+        )
+        hidden_states = nn.functional.glu(hidden_states, dim=-1)
+        hidden_states = hidden_states.transpose(1, 2)  # (B, C, T)
 
         # Zero out fully-masked (padding) frames before convolution so they don't leak into valid frames.
         # `all_masked_rows` is derived from the attention mask once in the encoder and shared across layers.
@@ -528,14 +533,16 @@ class NemotronAsrStreamingEncoderConvolutionModule(nn.Module):
         # Causal depthwise conv: left context from `padding_cache` when streaming, else left-padded.
         hidden_states = self.depthwise_conv(hidden_states, padding_cache=padding_cache)
 
-        # LayerNorm expects (B, T, C).
+        # LayerNorm and pointwise_conv2 run on (B, T, C).
         hidden_states = hidden_states.transpose(1, 2)
         hidden_states = self.norm(hidden_states)
-        hidden_states = hidden_states.transpose(1, 2)
 
         hidden_states = self.activation(hidden_states)
-        hidden_states = self.pointwise_conv2(hidden_states)
-        hidden_states = hidden_states.transpose(1, 2)  # (B, T, C)
+        hidden_states = nn.functional.linear(
+            hidden_states,
+            self.pointwise_conv2.weight.squeeze(-1),
+            self.pointwise_conv2.bias,
+        )
 
         return hidden_states
 
