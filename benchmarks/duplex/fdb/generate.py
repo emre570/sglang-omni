@@ -40,6 +40,7 @@ from benchmarks.duplex.run_artifacts import accounting, load_run
 from benchmarks.duplex.v10_dataset import SUBSETS as V10_SUBSETS
 
 PROGRESS_INTERVAL_S = 60
+WARMUP_DIR = "warmup"
 
 
 def record_command(
@@ -108,15 +109,16 @@ def v10_record_command(settings: Settings) -> list[str]:
     )
 
 
-def record_shards(
+def run_shards(
     base_commands: list[list[str]],
     root: Path,
     sample_ids: list[str],
     sessions_per_sample: int,
     num_shards: int,
-) -> list[Path]:
+) -> tuple[list[Path], int]:
     """Run num_shards recorders in parallel under root/recording, shard i on model
-    server i mod the server count; returns the shard directories."""
+    server i mod the server count; returns the shard directories and how many
+    shards had a session that did not pass."""
     session_count = sessions_per_sample * len(sample_ids)
     shards = [
         (
@@ -160,14 +162,61 @@ def record_shards(
                     f"   {time.strftime('%H:%M:%S')} finished sessions: {finished} / {session_count}"
                 )
             pending = [process for process in pending if process.poll() is None]
-    failed_shards = sum(process.returncode != 0 for process in processes)
+    return [shard_dir for shard_dir, _ in shards], sum(
+        process.returncode != 0 for process in processes
+    )
+
+
+def record_shards(
+    base_commands: list[list[str]],
+    root: Path,
+    sample_ids: list[str],
+    sessions_per_sample: int,
+    num_shards: int,
+) -> list[Path]:
+    """Record the scored sessions; returns the shard directories."""
+    shard_dirs, failed_shards = run_shards(
+        base_commands, root, sample_ids, sessions_per_sample, num_shards
+    )
     if failed_shards:
         log(
             f"WARNING: {failed_shards} shard(s) had non-passing sessions; they stay in the denominator."
         )
     else:
         pass
-    return [shard_dir for shard_dir, _ in shards]
+    return shard_dirs
+
+
+def warm_up(
+    base_commands: list[list[str]],
+    repeat_dir: Path,
+    sample_id: str,
+    sessions_per_sample: int,
+    num_shards: int,
+) -> None:
+    """Record sample_id once in every shard under repeat_dir/warmup before the
+    scored sessions; nothing scores these sessions."""
+    # note (jeffro): the first sessions on a fresh server pay its first-use
+    # costs, and with every shard starting at once some H100 runs first spoke
+    # seconds late, after the overlap they were meant to test had ended. One
+    # session per shard reproduces the scored run's concurrency, and like
+    # BenchmarkRunner's warmup it repeats one sample, the first selected.
+    root = repeat_dir / WARMUP_DIR
+    (root / "logs").mkdir(parents=True)
+    log(
+        f"== Warming up with {sample_id} in {num_shards} shard(s), "
+        f"{sessions_per_sample * num_shards} unscored session(s) -> {root}"
+    )
+    _, failed_shards = run_shards(
+        base_commands, root, [sample_id] * num_shards, sessions_per_sample, num_shards
+    )
+    if failed_shards:
+        log(
+            f"WARNING: {failed_shards} warmup shard(s) had non-passing sessions; "
+            f"see {root / 'logs'}. The scored recording follows."
+        )
+    else:
+        pass
 
 
 def print_variant_status(root: Path, shard_dir: Path) -> None:
@@ -240,6 +289,8 @@ def generate(
     v10_selection: SampleSelection,
     num_shards: int,
     gpus: tuple[str, ...],
+    *,
+    should_warm_up: bool = True,
 ) -> None:
     replicas = [settings.on_gpu(gpu) for gpu in gpus]
     max_sessions = settings.engine.max_sessions
@@ -288,6 +339,12 @@ def generate(
         shutil.rmtree(v10_dir)
     else:
         pass
+    if (repeat_dir / WARMUP_DIR).exists():
+        # note (jeffro): no recording follows a warmup that is still here, and
+        # this attempt warms its own server up again.
+        shutil.rmtree(repeat_dir / WARMUP_DIR)
+    else:
+        pass
     sample_ids = select_samples(settings.dataset, selection)
     v10_sample_ids = select_v10_samples(settings.dataset_v10, v10_selection)
     if not sample_ids and not v10_sample_ids:
@@ -334,6 +391,12 @@ def generate(
             )
             for replica in replicas
         ]
+        if not should_warm_up:
+            log("== Warmup skipped")
+        elif sample_ids:
+            warm_up(record, repeat_dir, sample_ids[0], 2, num_shards)
+        else:
+            warm_up(v10_record, repeat_dir, v10_sample_ids[0], 1, num_shards)
         shard_dirs = []
         if sample_ids:
             (repeat_dir / "recording").mkdir()

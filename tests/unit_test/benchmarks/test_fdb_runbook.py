@@ -203,6 +203,8 @@ def test_generate_all_stages_chains_the_steps_and_stops_at_a_failure(
 ) -> None:
     parser = build_parser()
     assert not parser.parse_args(["generate"]).all_stages
+    assert not parser.parse_args(["generate"]).skip_warmup
+    assert parser.parse_args(["generate", "--skip-warmup"]).skip_warmup
     args = parser.parse_args(
         ["generate", "--repeat", "2", "--num-shards", "3", "--all-stages"]
     )
@@ -229,6 +231,7 @@ def test_generate_all_stages_chains_the_steps_and_stops_at_a_failure(
             ("0",),
             all_stages,
             should_run_semantic_judge,
+            not args.skip_warmup,
         )
         return [name for name, _, _ in calls]
 
@@ -237,7 +240,7 @@ def test_generate_all_stages_chains_the_steps_and_stops_at_a_failure(
     assert chain(False) == ["generate"]
     assert chain(args.all_stages) == ["generate", "asr", "judge", "aggregate"]
     assert calls == [
-        ("generate", (settings, 2, *selections, 3, ("0",)), {}),
+        ("generate", (settings, 2, *selections, 3, ("0",)), {"should_warm_up": True}),
         ("asr", (settings, 2), {"retry_failed": False}),
         (
             "judge",
@@ -363,6 +366,7 @@ def stub_generate_phases(
         return [arguments[1] / "recording" / "shard-0"]
 
     monkeypatch.setattr(generate_module, "record_shards", record_shards)
+    monkeypatch.setattr(generate_module, "warm_up", lambda *_: None)
     monkeypatch.setattr(generate_module, "print_variant_status", lambda *_: None)
     monkeypatch.setattr(generate_module, "export_reference_audio", lambda *_: None)
     monkeypatch.setattr(
@@ -449,6 +453,127 @@ def test_record_shards_sends_shard_i_to_server_i_mod_their_count(
         3,
     )
     assert [(shard / "server").read_text() for shard in shard_dirs] == ["a", "b", "a"]
+
+
+def test_generate_warms_the_server_up_before_the_scored_recording(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The warmup repeats the first selected v1.5 pair, or the first v1.0 sample
+    when v1.5 is left out, once per shard; --skip-warmup leaves it out."""
+    stage_datasets(settings)
+    _, recordings, _ = stub_generate_phases(monkeypatch)
+    events: list[tuple] = []
+    monkeypatch.setattr(
+        generate_module,
+        "warm_up",
+        lambda *arguments: events.append(("warm_up", arguments)),
+    )
+    monkeypatch.setattr(
+        generate_module,
+        "record_shards",
+        lambda *arguments: events.append(("record", arguments[2]))
+        or [arguments[1] / "recording" / "shard-0"],
+    )
+    repeat_dir = settings.repeat_dir(1)
+    v15_ids = [f"{subset}/1" for subset in V15_SUBSETS]
+    v10_ids = [f"{subset}/1" for subset in V10_SUBSETS]
+    generate_module.generate(
+        settings,
+        1,
+        SampleSelection(per_subset=1),
+        SampleSelection(per_subset=1),
+        3,
+        (settings.gpu,),
+    )
+    assert events == [
+        (
+            "warm_up",
+            (
+                [generate_module.v15_record_command(settings)],
+                repeat_dir,
+                v15_ids[0],
+                2,
+                3,
+            ),
+        ),
+        ("record", v15_ids),
+        ("record", v10_ids),
+    ]
+    events.clear()
+    v10_only = load_settings("warmup-v10-only")
+    generate_module.generate(
+        v10_only,
+        1,
+        SampleSelection(per_subset=0),
+        SampleSelection(per_subset=1),
+        1,
+        (settings.gpu,),
+    )
+    assert events == [
+        (
+            "warm_up",
+            (
+                [generate_module.v10_record_command(v10_only)],
+                v10_only.repeat_dir(1),
+                v10_ids[0],
+                1,
+                1,
+            ),
+        ),
+        ("record", v10_ids),
+    ]
+    events.clear()
+    generate_module.generate(
+        settings,
+        2,
+        SampleSelection(per_subset=1),
+        SampleSelection(per_subset=1),
+        1,
+        (settings.gpu,),
+        should_warm_up=False,
+    )
+    assert [name for name, _ in events] == ["record", "record"]
+
+
+def test_warm_up_records_the_sample_once_per_shard_outside_the_recording(
+    tmp_path: Path,
+) -> None:
+    """Each shard records the warmup sample on its own server under warmup/, and
+    a failed warmup session leaves the scored recording to go on."""
+    repeat_dir = tmp_path / "repeat-1"
+    script = (
+        "import pathlib, sys; "
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1]); "
+        "out.mkdir(parents=True); (out / 'server').write_text(sys.argv[1]); "
+        "(out / 'samples').write_text(' '.join(sys.argv[sys.argv.index('--sample-id'):])); "
+        "sys.exit(sys.argv[1] == 'b')"
+    )
+    commands = [[sys.executable, "-c", script, name] for name in ("a", "b")]
+    generate_module.warm_up(commands, repeat_dir, "user_interruption/1", 2, 3)
+    shards = sorted((repeat_dir / "warmup" / "recording").iterdir())
+    assert [(shard / "server").read_text() for shard in shards] == ["a", "b", "a"]
+    assert {(shard / "samples").read_text() for shard in shards} == {
+        "--sample-id user_interruption/1"
+    }
+    assert not (repeat_dir / "recording").exists()
+
+
+def test_generate_discards_the_warmup_of_an_attempt_that_never_recorded(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_datasets(settings)
+    stub_generate_phases(monkeypatch)
+    stale = settings.repeat_dir(1) / "warmup" / "recording" / "shard-0"
+    stale.mkdir(parents=True)
+    generate_module.generate(
+        settings,
+        1,
+        SampleSelection(per_subset=1),
+        SampleSelection(per_subset=0),
+        1,
+        (settings.gpu,),
+    )
+    assert not stale.exists()
 
 
 def test_generate_without_v10_writes_no_v10_directory_and_fails_before_the_server(

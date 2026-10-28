@@ -146,6 +146,12 @@ def build_parser() -> argparse.ArgumentParser:
         "their count (default: the job GPU)",
     )
     generate_parser.add_argument(
+        "--skip-warmup",
+        action="store_true",
+        help="Start the scored sessions on a fresh server, without first recording "
+        "one unscored session per shard",
+    )
+    generate_parser.add_argument(
         "--all-stages",
         action="store_true",
         help="After recording, run asr, judge and aggregate; stops at the first "
@@ -243,11 +249,20 @@ def generate_stages(
     gpus: tuple[str, ...],
     all_stages: bool,
     should_run_semantic_judge: bool,
+    should_warm_up: bool,
 ) -> None:
     """Step 1, and with all_stages steps 2 and 3 and aggregate after it. A failing
     step stops the chain with its own message, which names the command that
     continues it."""
-    generate(settings, repeat, selection, v10_selection, num_shards, gpus)
+    generate(
+        settings,
+        repeat,
+        selection,
+        v10_selection,
+        num_shards,
+        gpus,
+        should_warm_up=should_warm_up,
+    )
     if all_stages:
         asr(settings, repeat, retry_failed=False)
         judge(
@@ -293,6 +308,7 @@ def main() -> None:
             (settings.gpu,) if args.gpus is None else args.gpus,
             args.all_stages,
             not args.skip_semantic_judge,
+            not args.skip_warmup,
         )
     elif args.command == "asr":
         asr(settings, args.repeat, args.retry_failed)
