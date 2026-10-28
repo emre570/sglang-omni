@@ -76,6 +76,9 @@ Supported Models
    * - `nvidia/nemotron-3.5-asr-streaming-0.6b <https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b>`_
      - ASR
      - Multilingual RNN-T transcription; internal native PCM streaming runtime (see `cookbook <cookbook/nemotron3_5_asr.html>`_)
+   * - `nvidia/Nemotron-3.5-Transcribe-30B-A4B <https://huggingface.co/nvidia/Nemotron-3.5-Transcribe-30B-A4B>`_
+     - ASR
+     - Whole-file transcription with native speech and speaker-fusion encoders (see `cookbook <cookbook/nemotron_transcribe.html>`_)
    * - `OpenMOSS-Team/MOSS-Transcribe-Diarize <https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize>`_
      - ASR
      - Multi-speaker transcription + diarization + timestamps
@@ -123,6 +126,7 @@ Supported Models
    cookbook/moss_tts.md
    cookbook/whisper_asr.md
    cookbook/nemotron3_5_asr.md
+   cookbook/nemotron_transcribe.md
    cookbook/moss_transcribe_diarize.md
    cookbook/fishaudio_s2_pro.md
    cookbook/fun_cosyvoice3.md
@@ -142,6 +146,7 @@ Supported Models
    cookbook/auk.md
    cookbook/zonos2.md
    cookbook/arkasr.md
+   cookbook/hy_simulmt.md
    cookbook/voxtral_tts.md
    cookbook/dots_tts.md
    cookbook/llada2_uni.md
